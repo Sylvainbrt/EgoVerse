@@ -25,6 +25,8 @@ cd EgoMimic
 conda env create -f environment.yaml
 pip install projectaria-tools'[all]'
 pip install -e external/robomimic
+pip install -e external/rldb
+pip install -e external/rldb/external/lerobot
 pip install -e .
 python external/robomimic/robomimic/scripts/setup_macros.py
 ```
@@ -120,9 +122,9 @@ Debug (run on a comppute node )
 `python egomimic/trainHydra.py trainer=debug logger=debug`
 
 Submitit (Run this in sky1/sky2)
-`python egomimic/trainHydra.py -m launch_params.gpus_per_node=<gpus per node> launch_params.nodes=<nodes>`
+`python egomimic/trainHydra.py -m launch_params.gpus_per_node=<gpus per node> launch_params.nodes=<nodes> name=<name> description=<>`
 
-
+For overcap just add `launcher.partition=overcap`
 
 might need to fork hydra_submitit_launcher
 

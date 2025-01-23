@@ -17,7 +17,7 @@ class ModelWrapper(LightningModule):
     Wrapper class around robomimic models to ensure compatibility with Pytorch Lightning.
     """
 
-    def __init__(self, robomimic_model, optimizer, scheduler, train_cfg, datamodule=None):
+    def __init__(self, robomimic_model, optimizer, scheduler, datamodule=None):
         """
         Args:
             model (PolicyAlgo): robomimic model to wrap.
@@ -38,8 +38,6 @@ class ModelWrapper(LightningModule):
 
         self.datamodule = datamodule
         self.dual_dl = isinstance(datamodule, DualDataModuleWrapper)
-
-        self.train_cfg = train_cfg
 
         self.val_image_buffer, self.val_counter = [], 0
         # TODO __init__ should take the config, and init the model here.  Then save_hyperparameters will just save the config rather than the model
@@ -80,7 +78,6 @@ class ModelWrapper(LightningModule):
         )
         for batch, ac_key, norm_dict in zip(batch, ac_keys, norm_dicts):
             batch = self.model.process_batch_for_training(batch)
-            # batch = self.model.postprocess_batch_for_training(batch, norm_dict, normalize_actions=self.train_cfg.normalize_actions)
             predictions = self.model.forward_training(batch)
             losses = self.model.compute_losses(predictions, batch)
             loss_dicts.append(losses)

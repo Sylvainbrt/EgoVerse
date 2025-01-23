@@ -55,10 +55,3 @@ scheduler:
   _partial_: true
   start_factor: 1
   end_factor: 1
-
-train_cfg:
-  normalize_actions: false
-  normalize_obs: false
-  validation_max_samples: 15000
-  validation_freq: 200
-  video_save_freq: 200

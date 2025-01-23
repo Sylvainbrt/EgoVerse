@@ -5,6 +5,8 @@ import lightning as L
 import torch
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
+from lightning.pytorch.plugins.environments import SLURMEnvironment
+import signal
 from omegaconf import DictConfig, OmegaConf
 OmegaConf.register_new_resolver("eval", eval)
 
@@ -56,6 +58,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
 
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
+    plugins = []
+    if os.environ.get("SLURM_JOB_ID"):
+        plugins.append(SLURMEnvironment(requeue_signal=[signal.SIGUSR1, signal.SIGUSR2]))
+        print("SLURM REQUEUE ENABLED")
     trainer: Trainer = hydra.utils.instantiate(cfg.trainer, callbacks=callbacks, logger=logger)
 
     object_dict = {

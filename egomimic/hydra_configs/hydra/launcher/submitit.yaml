@@ -14,3 +14,5 @@ gres: "gpu:a40:${eval:'${launch_params.gpus_per_node} * ${launch_params.nodes}'}
 qos: "short"                                        # Slurm QoS
 timeout_min: 2880                                   # Timeout in minutes (48 hours)
 exclude: "dave,robby,baymax,crushinator,trublu"     # Nodes to exclude
+additional_parameters:
+  requeue: true
