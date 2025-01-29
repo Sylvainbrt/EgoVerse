@@ -43,13 +43,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data, dataset={"data_schematic": data_schematic})
     
-    # Initialize the data schematic's shapes
-    data_schematic.infer_shapes_from_batch(datamodule.dataset1[0])
+    # Initialize the data schematic's shapes.  During training we manually calls these functions to infer shapes / norm stats.  At eval, the data_schematic will simply be loaded from the checkpoint.
+    data_schematic.infer_shapes_from_batch(datamodule.dataset[0])
+    # data_schematic.set_norm_stats(datamodule.dataset.get_obs_normalization_stats())
+    data_schematic.infer_norm_from_dataset(datamodule.dataset)
     
-    # Currently pl_model takes in the datamodule, this is bad practice but it's for convenience of running evals
-    # We also pass the data_schematic into the robomimic model's instatiation now that we've initialzied the shapes.  In theory, upon loading the PL checkpoint, it will remember this, but let's see.
+    #NOTE: We also pass the data_schematic into the robomimic model's instatiation now that we've initialzied the shapes and norm stats.  In theory, upon loading the PL checkpoint, it will remember this, but let's see.
     log.info(f"Instantiating model <{cfg.model._target_}>")
-    model: LightningModule = hydra.utils.instantiate(cfg.model, datamodule=datamodule, robomimic_model={"data_schematic": data_schematic})
+    model: LightningModule = hydra.utils.instantiate(cfg.model, robomimic_model={"data_schematic": data_schematic})
 
     log.info("Instantiating callbacks...")
     callbacks: List[Callback] = instantiate_callbacks(cfg.get("callbacks"))

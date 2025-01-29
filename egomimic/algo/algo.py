@@ -35,7 +35,7 @@ class Algo:
         """
         raise NotImplementedError("Must implement forward_training in subclass")
 
-    def forward_eval(self, batch, unnorm_stats):
+    def forward_eval(self, batch):
         """
         Compute forward pass and return network outputs in @predictions dict.
         Args:

@@ -9,11 +9,11 @@ from termcolor import cprint
 class RLDBModule(LightningDataModule):
     def __init__(self, dataset, dataloader_kwargs):
         super().__init__()
-        self.dataset1 = dataset
+        self.dataset = dataset
         self.dataloader_kwargs = dataloader_kwargs
 
         # self.train_dataset, self.val_dataset = random_split(self.dataset1, [0.8, 0.2])
-        self.train_dataset, self.val_dataset = self.dataset1, self.dataset1
+        self.train_dataset, self.val_dataset = dataset, dataset
         cprint(f"Warning: RLDBModule is using the same dataset for train and val", "yellow")
 
     
@@ -111,53 +111,3 @@ class DataModuleWrapper(LightningDataModule):
             dataset=self.valid_dataset, **self.valid_dataloader_params
         )
         return new_dataloader
-
-
-def get_dual_data_module(
-    trainset, trainset_2, validset, validset_2, train_sampler, valid_sampler, config
-):
-    return DualDataModuleWrapper(
-        train_dataset1=trainset,
-        valid_dataset1=validset,
-        train_dataset2=trainset_2,
-        valid_dataset2=validset_2,
-        train_dataloader_params=dict(
-            sampler=train_sampler,
-            batch_size=config.train.batch_size,
-            shuffle=(train_sampler is None),
-            num_workers=config.train.num_data_workers,
-            drop_last=True,
-            pin_memory=True,
-        ),
-        valid_dataloader_params=dict(
-            sampler=valid_sampler,
-            batch_size=config.train.batch_size,
-            shuffle=False,
-            num_workers=config.train.num_data_workers,
-            drop_last=True,
-            pin_memory=True,
-        ),
-    )
-
-
-def get_data_module(trainset, validset, train_sampler, valid_sampler, config):
-    return DataModuleWrapper(
-        train_dataset=trainset,
-        valid_dataset=validset,
-        train_dataloader_params=dict(
-            sampler=train_sampler,
-            batch_size=config.train.batch_size,
-            shuffle=(train_sampler is None),
-            num_workers=config.train.num_data_workers,
-            drop_last=True,
-            pin_memory=True,
-        ),
-        valid_dataloader_params=dict(
-            sampler=valid_sampler,
-            batch_size=config.train.batch_size,
-            shuffle=False,
-            num_workers=config.train.num_data_workers,
-            drop_last=True,
-            pin_memory=True,
-        ),
-    )

@@ -11,37 +11,12 @@ import torchvision.transforms.v2.functional as TVTF
 import scipy
 from numbers import Number
 
-REALSENSE_INTRINSICS = np.array(
-    [[616.0, 0.0, 313.4, 0.0], [0.0, 615.7, 236.7, 0.0], [0.0, 0.0, 1.0, 0.0]]
-)  # Internal realsense numbers
-# K: [616.16650390625, 0.0, 313.42645263671875, 0.0, 615.7142333984375, 236.67532348632812, 0.0, 0.0, 1.0]
-
 ARIA_INTRINSICS = np.array(
     [
         [133.25430222 * 2, 0.0, 320, 0],
         [0.0, 133.25430222 * 2, 240, 0],
         [0.0, 0.0, 1.0, 0],
     ]
-)
-
-# A2 paper without turning in skew direction
-WIDE_LENS_ROBOT_LEFT_K = np.array(
-    [
-        [133.25430222 * 2, 0.0, 160.27941013 * 2, 0],
-        [0.0, 133.2502574 * 2, 122.05743188 * 2, 0],
-        [0.0, 0.0, 1.0, 0],
-    ]
-)
-WIDE_LENS_HAND_LEFT_K = np.array(
-    [
-        [265.83575589493415, 0.0, 324.5832835740557, 0.0],
-        [0.0, 265.8940770981264, 244.23118856728662, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-    ]
-)
-
-WIDE_LENS_ROBOT_LEFT_D = np.array(
-    [[0.00087175, -0.00866803, 0.00016203, 0.00050252, -0.004487]]
 )
 
 # Cam to base extrinsics
@@ -75,6 +50,8 @@ INTRINSICS = {
 class CameraTransforms:
     def __init__(self, intrinsics_key, extrinsics_key):
         self.intrinsics = INTRINSICS[intrinsics_key]
+        # BC we're using 320x240 images now
+        self.intrinsics[:-1] = self.intrinsics[:-1] / 2
         self.extrinsics = EXTRINSICS[extrinsics_key]
 
 

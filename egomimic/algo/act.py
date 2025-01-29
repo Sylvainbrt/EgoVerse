@@ -192,7 +192,8 @@ class ACT(Algo):
         chunk_size,
         backbones,
         kl_weight,
-        image_augs,
+        train_image_augs,
+        eval_image_augs,
         transformer,
         style_encoder,
         latent_dim,
@@ -211,7 +212,8 @@ class ACT(Algo):
 
 
         self.kl_weight = kl_weight
-        self.image_augs = image_augs
+        self.train_image_augs = train_image_augs
+        self.eval_image_augs = eval_image_augs
 
         self.backbones = backbones
         if len(backbones) != len(self.camera_keys):
@@ -223,6 +225,11 @@ class ACT(Algo):
         if len(self.proprio_keys) > 1:
             raise ValueError(f"Current implementation only supports one proprio_key but got proprio_keys={self.proprio_keys}")
         state_dim = data_schematic.key_shape(self.proprio_keys[0])[-1]
+
+        if len(self.data_schematic.norm_stats.keys()) != 1:
+            raise ValueError("ACT expects only single embodiment to be in dataset, instead found embodiment keys: ", self.data_schematic.norm_stats.keys())
+        self.embodiment_id = [k for k in self.data_schematic.norm_stats.keys()][0]
+
 
         model = ACTModel(
             backbones=backbones,
@@ -257,7 +264,10 @@ class ACT(Algo):
                 _index: torch.Size([32])
                 pad_mask: torch.Size([32, 100, 1])
         """
-        # TODO (Simar) implement normalization here itself.
+        # checked in init to make sure there is only one embodiment
+        batch = self.data_schematic.normalize_data(batch, self.embodiment_id)
+
+        batch["joint_positions"] = batch["joint_positions"][:, None, :]
 
         return batch
     
@@ -295,9 +305,10 @@ class ACT(Algo):
         return predictions
 
     @override
-    def forward_eval(self, batch, unnorm_stats):
+    def forward_eval(self, batch):
         """
         Compute forward pass and return network outputs in @predictions dict.
+        Unnormalize data here.
         Args:
             batch (dict): dictionary with torch.Tensors sampled
                 from a data loader and filtered by @process_batch_for_training (see docstring for expected keys/shapes)
@@ -314,13 +325,10 @@ class ACT(Algo):
 
         predictions = OrderedDict()
         predictions[self.ac_key] = a_hat
-
         
-        #TODO (Simar): Get unnorm_stats from data_schematic
-        if unnorm_stats:
-            predictions = ObsUtils.unnormalize_batch(predictions, unnorm_stats)
+        unnorm_preds = self.data_schematic.unnormalize_data(predictions, self.embodiment_id)
 
-        return predictions
+        return unnorm_preds
 
     @override
     def forward_eval_logging(self, batch):
@@ -334,7 +342,11 @@ class ACT(Algo):
                 metricname: value (float)
             image: (B, 3, H, W)
         """
-        preds = self.forward_eval(batch, None)
+        # forward_eval will unnormalize predictions
+        preds = self.forward_eval(batch)
+        # Must unnormalize ground truth as well bc this data came from @process_batch_for_training
+        batch = self.data_schematic.unnormalize_data(batch, self.embodiment_id)
+
         metrics = {}
         mse = MeanSquaredError()
         for ac_key in self.data_schematic.keys_of_type("action_keys"):
@@ -459,7 +471,9 @@ class ACT(Algo):
             for cam_name in cam_keys:
                 image = batch[cam_name]
                 if self.nets.training:
-                    image = self.image_augs(image)
+                    image = self.train_image_augs(image)
+                else:
+                    image = self.eval_image_augs(image)
                 image = image.unsqueeze(axis=1)
                 images.append(image)
             images = torch.cat(images, axis=1)

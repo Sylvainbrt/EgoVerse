@@ -17,13 +17,13 @@ class ModelWrapper(LightningModule):
     Wrapper class around robomimic models to ensure compatibility with Pytorch Lightning.
     """
 
-    def __init__(self, robomimic_model, optimizer, scheduler, datamodule=None):
+    def __init__(self, robomimic_model, optimizer, scheduler):
         """
         Args:
             model (PolicyAlgo): robomimic model to wrap.
         """
         super().__init__()
-        self.save_hyperparameters(ignore=["datamodule"])
+        self.save_hyperparameters()
 
         self.model = robomimic_model
         self.nets = (
@@ -36,9 +36,6 @@ class ModelWrapper(LightningModule):
         self.step_log_all_train = []
         self.step_log_all_valid = []
 
-        self.datamodule = datamodule
-        self.dual_dl = isinstance(datamodule, DualDataModuleWrapper)
-
         self.val_image_buffer, self.val_counter = [], 0
         # TODO __init__ should take the config, and init the model here.  Then save_hyperparameters will just save the config rather than the model
     
@@ -49,38 +46,13 @@ class ModelWrapper(LightningModule):
         return os.path.join(self.root_dir(), "videos")
 
     def training_step(self, batch, batch_idx):
-        if self.datamodule is None:
-            raise ValueError("Cannot train if datamodule is none, make sure to pass hydra.utils.instantiate(cfg.model, data_module=datamodule)")
-        DUAL_DL = isinstance(batch, list)
-        # plt.imsave("debug/front_img_1.png", batch[0]["obs"]["front_img_1"][0, 0].cpu().numpy())
-
-        # full_batch = batch
-        # batch = full_batch[0]
         self.train()
         loss_dicts = []
-        if not DUAL_DL:
-            batch = [batch]
-        ac_keys = (
-            [
-                self.model.ac_key,
-                self.model.ac_key_hand,
-            ]
-            if self.dual_dl
-            else [self.model.ac_key]
-        )
-        norm_dicts = (
-            [
-                self.datamodule.train_dataset1.get_obs_normalization_stats(),
-                self.datamodule.train_dataset2.get_obs_normalization_stats()
-            ]
-            if self.dual_dl
-            else [self.datamodule.dataset1.get_obs_normalization_stats()]
-        )
-        for batch, ac_key, norm_dict in zip(batch, ac_keys, norm_dicts):
-            batch = self.model.process_batch_for_training(batch)
-            predictions = self.model.forward_training(batch)
-            losses = self.model.compute_losses(predictions, batch)
-            loss_dicts.append(losses)
+
+        batch = self.model.process_batch_for_training(batch)
+        predictions = self.model.forward_training(batch)
+        losses = self.model.compute_losses(predictions, batch)
+        loss_dicts.append(losses)
 
         # Average over both the hand and robot batch if applicable
         losses = OrderedDict()
@@ -93,14 +65,6 @@ class ModelWrapper(LightningModule):
         info["losses"] = TensorUtils.detach(losses)
         self.step_log_all_train.append(self.model.log_info(info))
 
-        # count=0
-        # for name, param in self.named_parameters():
-        #     if param.grad is None:
-        #         count += 1
-        #         # print(name)
-        # print("Unused params: ", count)
-        # print(self.global_step, self.model.global_config.experiment.epoch_every_n_steps)
-        # breakpoint()
         return losses["action_loss"]
 
     @rank_zero_only

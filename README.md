@@ -28,13 +28,10 @@ pip install -e external/robomimic
 pip install -e external/rldb
 pip install -e external/rldb/external/lerobot
 pip install -e .
-python external/robomimic/robomimic/scripts/setup_macros.py
 ```
 
 Set `git config --global submodule.recurse true` if you want `git pull` to automatically update the submodule as well.
-
-Then go to  `external/robomimic/robomimic/macros_private.py` and manually add your wandb username. Make sure you have ran `wandb login` too.
-
+Set your wandb project in ``egomimic/hydra_configs/logger/wandb.yaml``
 
 **Download Sample Data**
 ```
@@ -126,6 +123,20 @@ Submitit (Run this in sky1/sky2)
 
 For overcap just add `launcher.partition=overcap`
 
-might need to fork hydra_submitit_launcher
+## Submitit modification
+Tip: after you launch via submitit, you'll notice that the command won't finish executing.  If you want it to end the command after you launch a job, edit the following file
 
-`/coc/flash9/skareer6/miniconda3/envs/emimic/lib/python3.10/site-packages/hydra_plugins/hydra_submitit_launcher/submitit_launcher`
+`/path/to/your/miniconda3/envs/emimic/lib/python3.10/site-packages/hydra_plugins/hydra_submitit_launcher/submitit_launcher.py`
+
+Change line 144 to
+```
+        jobs = executor.map_array(self, *zip(*job_params))
+
+        return [asyncLauncher() for j in jobs]
+
+class asyncLauncher:
+    def __init__(self):
+        self.return_value = 0
+```
+
+I wanted to package this change nicely, but the hydra package is built very weirdly.  I tried to pip install -e . locally but the plugins package doesn't install correctly.  I'll try to PR this change into the main repo
