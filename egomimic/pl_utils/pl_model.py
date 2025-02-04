@@ -45,6 +45,7 @@ class ModelWrapper(LightningModule):
     def video_dir(self):
         return os.path.join(self.root_dir(), "videos")
 
+    #batch is now a dict, handle on model side
     def training_step(self, batch, batch_idx):
         self.train()
         loss_dicts = []
@@ -72,8 +73,9 @@ class ModelWrapper(LightningModule):
         # make the video directory for this epoch
         os.makedirs(os.path.join(self.video_dir(), f"epoch_{self.trainer.current_epoch}"), exist_ok=True)
 
+    #TODO: dict of buffer for each data loader 
     @rank_zero_only
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
         """
         Run a validation step on the batch, and save that batch of images into the val_image_buffer.  Once the buffer hits 1000 images, save that as a 30fps video using torchvision.io.write_video.  
         """

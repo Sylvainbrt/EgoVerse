@@ -1,4 +1,5 @@
 from torch.utils.data import DataLoader, random_split
+from lightning.pytorch.utilities.combined_loader import CombinedLoader
 from lightning import LightningDataModule
 from egomimic.utils.egomimicUtils import nds
 import json
@@ -20,6 +21,43 @@ class RLDBModule(LightningDataModule):
     def val_dataloader(self):
         return DataLoader(self.val_dataset, shuffle=False, **self.valid_dataloader_kwargs)
 
+# TODO: Use pytorch lightning combined loader
+# TODO: when completed, check isinstance(dict)
+class MultiDataModuleWrapper(LightningDataModule):
+    """
+    New functionality for dictionary based multi embodiment loading using CombinedLoader.
+
+    Uses hydra to instantiate DataLoader objects and then wraps them in a combined loader
+    """
+    def __init__(
+        self,
+        train_datasets: dict,
+        valid_datasets: dict,
+        train_dataloader_params : dict,
+        valid_dataloader_params : dict,
+    ):
+
+        super().__init__()
+        self.train_datasets = train_datasets
+        self.valid_datasets = valid_datasets
+        self.train_dataloader_params = train_dataloader_params
+        self.valid_dataloader_params = valid_dataloader_params
+
+    def train_dataloader(self):
+        iterables = dict()
+        for dataset_name, dataset in self.train_datasets.items():
+            dataset_params = self.train_dataloader_params.get(dataset_name, {})
+            iterables[dataset[0]["metadata.embodiment"]] = DataLoader(self.dataset, shuffle=True, **dataset_params)
+        
+        return CombinedLoader(iterables, 'min_size')
+    
+    def val_dataloader(self):
+        iterables = dict()
+        for dataset_name, dataset in self.valid_datasets.items():
+            dataset_params = self.valid_dataloader_params.get(dataset_name, {})
+            iterables[dataset[0]["metadata.embodiment"]] = DataLoader(self.dataset, shuffle=False, **dataset_params)
+        
+        return CombinedLoader(iterables, 'min_size')
 
 class DualDataModuleWrapper(LightningDataModule):
     """
@@ -55,18 +93,16 @@ class DualDataModuleWrapper(LightningDataModule):
             dataset=self.train_dataset2, **self.train_dataloader_params
         )
         return [new_dataloader1, new_dataloader2]
-
-    def val_dataloader_1(self):
-        new_dataloader = DataLoader(
-            dataset=self.valid_dataset1, **self.valid_dataloader_params
+    
+    ## to change embodiment sampling freq, just change the batch_size
+    def val_dataloader(self):
+        new_dataloader1 = DataLoader(
+            dataset=self.valid_dataset1, shuffle=False, **self.valid_dataloader_params
         )
-        return new_dataloader
-
-    def val_dataloader_2(self):
-        new_dataloader = DataLoader(
-            dataset=self.valid_dataset2, **self.valid_dataloader_params
+        new_dataloader2 = DataLoader(
+            dataset=self.valid_dataset2, shuffle=False, **self.train_dataloader_params
         )
-        return new_dataloader
+        return [new_dataloader1, new_dataloader2]
 
     # def val_dataloader(self):
     #     new_dataloader1 = DataLoader(dataset=self.valid_dataset1, **self.valid_dataloader_params)

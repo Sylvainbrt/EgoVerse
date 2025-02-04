@@ -44,6 +44,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data, dataset={"data_schematic": data_schematic})
     
     # Initialize the data schematic's shapes.  During training we manually calls these functions to infer shapes / norm stats.  At eval, the data_schematic will simply be loaded from the checkpoint.
+
+    
+    # TODO: change this to call for each data loader
     data_schematic.infer_shapes_from_batch(datamodule.train_dataset[0])
     # data_schematic.set_norm_stats(datamodule.dataset.get_obs_normalization_stats())
     data_schematic.infer_norm_from_dataset(datamodule.train_dataset)

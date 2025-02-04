@@ -5,7 +5,7 @@ defaults:
   - debug: null
   - logger: wandb
   - override hydra/launcher: submitit
-  - data: dual_data
+  - data: multi_data
   - _self_
 
 name: test
@@ -25,6 +25,7 @@ launch_params:
   gpus_per_node: 1
   nodes: 1
 
+#TODO: change schematic dict to embodiments
 data_schematic: # Dynamically fill in these shapes from the dataset
   _target_: rldb.utils.DataSchematic
   schematic_dict:
@@ -43,5 +44,8 @@ data_schematic: # Dynamically fill in these shapes from the dataset
     actions_joints:
       key_type: action_keys
       lerobot_key: actions_joints
+    embodiment:
+      key_type: metadata_keys
+      lerobot_key: metadata.embodiment
 
   viz_img_key: front_img_1
