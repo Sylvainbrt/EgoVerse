@@ -200,12 +200,11 @@ class ACT(Algo):
     ):
         super().__init__()
 
-        if len(data_schematic) > 1:
-            raise ValueError("ACT should only have 1 dataset")
-
-        #NOTE: Since data_schematic is now a dict of data schematics, we have to filter the first key.
-        dataset_key = next(iter(data_schematic))
-        self.data_schematic = data_schematic[dataset_key]
+        if len(data_schematic.embodiments) > 1:
+            raise ValueError("ACT should only have 1 embodiment")
+        
+        self.embodiment_id = list(data_schematic.embodiments)[0]
+        self.data_schematic = data_schematic
         self.camera_transforms = camera_transforms
         self.camera_keys = self.data_schematic.keys_of_type("camera_keys")
         self.proprio_keys = self.data_schematic.keys_of_type("proprio_keys")
@@ -216,7 +215,6 @@ class ACT(Algo):
 
         self.chunk_size = chunk_size
 
-
         self.kl_weight = kl_weight
         self.train_image_augs = train_image_augs
         self.eval_image_augs = eval_image_augs
@@ -225,16 +223,16 @@ class ACT(Algo):
         if len(backbones) != len(self.camera_keys):
             raise ValueError(f"Number of backbones ({len(backbones)}) doesn't match number of camera_keys ({len(self.camera_keys)}) ")
 
-        num_channels = backbones[0].output_shape(self.data_schematic.key_shape(self.camera_keys[0]))[0]
-        a_dim = self.data_schematic.key_shape(self.ac_key)[-1]
+        num_channels = backbones[0].output_shape(self.data_schematic.key_shape(self.camera_keys[0], self.embodiment_id))[0]
+        a_dim = self.data_schematic.key_shape(self.ac_key, self.embodiment_id)[-1]
         
         if len(self.proprio_keys) > 1:
             raise ValueError(f"Current implementation only supports one proprio_key but got proprio_keys={self.proprio_keys}")
-        state_dim = self.data_schematic.key_shape(self.proprio_keys[0])[-1]
+        state_dim = self.data_schematic.key_shape(self.proprio_keys[0], self.embodiment_id)[-1]
 
         if len(self.data_schematic.norm_stats.keys()) != 1:
             raise ValueError("ACT expects only single embodiment to be in dataset, instead found embodiment keys: ", self.data_schematic.norm_stats.keys())
-        self.embodiment_id = [k for k in self.data_schematic.norm_stats.keys()][0]
+        
 
 
         model = ACTModel(
@@ -270,13 +268,26 @@ class ACT(Algo):
                 _index: torch.Size([32])
                 pad_mask: torch.Size([32, 100, 1])
         """
-        # checked in init to make sure there is only one embodiment
+        processed_batch = {}
+        
         batch = batch[next(iter(batch))]
-        batch = self.data_schematic.normalize_data(batch, self.embodiment_id)
+        for key, value in batch.items():
+            key_name = self.data_schematic.lerobot_key_to_keyname(key, self.embodiment_id)
+            if key_name is not None:
+                processed_batch[key_name] = value
+        
+        if len(processed_batch[self.ac_key][0].shape) != 2:
+            raise ValueError("Action shape is not 2")
+        
+        B, S, _ = processed_batch[self.ac_key].shape
+        device = processed_batch[self.ac_key].device
+        processed_batch["pad_mask"]  = torch.ones(B, S, 1, device=device)
 
-        batch["joint_positions"] = batch["joint_positions"][:, None, :]
+        processed_batch = self.data_schematic.normalize_data(processed_batch, self.embodiment_id)
 
-        return batch
+        processed_batch["joint_positions"] = processed_batch["joint_positions"][:, None, :]
+
+        return processed_batch
     
     @override
     def forward_training(self, batch):
@@ -376,7 +387,7 @@ class ACT(Algo):
         Returns:
             ims (np.ndarray): (B, H, W, 3) - images with actions drawn on top
         """
-        ims = (batch[self.data_schematic.viz_img_key()].cpu().numpy().transpose((0, 2, 3, 1)) * 255).astype(np.uint8)
+        ims = (batch[self.data_schematic.viz_img_key()[self.embodiment_id]].cpu().numpy().transpose((0, 2, 3, 1)) * 255).astype(np.uint8)
         preds = preds[self.data_schematic.action_keys()[0]]
         gt = batch[self.data_schematic.action_keys()[0]]
 

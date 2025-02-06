@@ -700,7 +700,23 @@ class HPT(Algo):
     @override
     def process_batch_for_training(self, batch):
         batch = self.data_schematic.normalize_data(batch, self.embodiment_id)
-        
 
+    def forward_training(self, batch):
+    
+    def forward_eval(self, batch):
+    
+    def forward_eval_logging(self, batch):
+
+    def visualize_preds(self, preds, batch):
+    
+    def compute_losses(self, predictions, batch):
+    
+    def log_info(self, info):
+
+    def _modality_check(self, batch):
+
+    def _robomimic_to_hpt_data(self, batch)
+        
+    
 
     

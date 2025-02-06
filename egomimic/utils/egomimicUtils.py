@@ -20,18 +20,6 @@ ARIA_INTRINSICS = np.array(
     ]
 )
 
-class EMBODIMENT(Enum):
-    EVE_RIGHT_ARM = 0
-    EVE_LEFT_ARM = 1
-    EVE_BIMANUAL = 2
-    ARIA_RIGHT_ARM = 3
-    ARIA_LEFT_ARM = 4
-    ARIA_BIMANUAL = 5
-
-EMBODIMENT_ID_TO_KEY = {member.value: key for key, member in EMBODIMENT.__members__.items()}
-
-def get_embodiment(index):
-    return EMBODIMENT_ID_TO_KEY.get(index, None)
 
 # Cam to base extrinsics
 EXTRINSICS = {

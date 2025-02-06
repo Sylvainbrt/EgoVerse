@@ -50,17 +50,17 @@ class MultiDataModuleWrapper(LightningDataModule):
         iterables = dict()
         for dataset_name, dataset in self.train_datasets.items():
             dataset_params = self.train_dataloader_params.get(dataset_name, {})
-            iterables[int(dataset[0]["embodiment"])] = DataLoader(dataset, shuffle=True, **dataset_params)
+            iterables[dataset.embodiment] = DataLoader(dataset, shuffle=True, **dataset_params)
         
-        return CombinedLoader(iterables, 'min_size')
+        return CombinedLoader(iterables, 'max_size_cycle')
     
     def val_dataloader(self):
         iterables = dict()
         for dataset_name, dataset in self.valid_datasets.items():
             dataset_params = self.valid_dataloader_params.get(dataset_name, {})
-            iterables[int(dataset[0]["embodiment"])] = DataLoader(dataset, shuffle=False, **dataset_params)
+            iterables[dataset.embodiment] = DataLoader(dataset, shuffle=False, **dataset_params)
         
-        return CombinedLoader(iterables, 'min_size')
+        return CombinedLoader(iterables, 'max_size_cycle')
 
 class DualDataModuleWrapper(LightningDataModule):
     """

@@ -37,14 +37,14 @@ train_dataloader_params:
   dataset1:
     batch_size: 32
     num_workers: 10
-  dataset2:
-    batch_size: 32
-    num_workers: 10
+  # dataset2:
+  #   batch_size: 32
+  #   num_workers: 10
 
 valid_dataloader_params:
   dataset1:
     batch_size: 32
     num_workers: 10
-  dataset2:
-    batch_size: 32
-    num_workers: 10
+  # dataset2:
+  #   batch_size: 32
+  #   num_workers: 10
