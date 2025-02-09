@@ -793,8 +793,10 @@ class DatasetConverter:
 
         if self.arm == "both":
             self.robot_type = "aria_bimanual"
-        else:
-            self.robot_type = "aria_single"        
+        elif self.arm == "right":
+            self.robot_type = "aria_right_arm"
+        elif self.arm == "left":
+            self.robot_type = "aria_left_arm"         
         
         self.features, metadata = AriaVRSExtractor.define_features(
             processed_episode,
