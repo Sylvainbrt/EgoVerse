@@ -744,7 +744,7 @@ class HPT(Algo):
             B, S, _ = processed_batch[embodiment_id][ac_key].shape
             device = processed_batch[embodiment_id][ac_key].device
             processed_batch[embodiment_id]["pad_mask"]  = torch.ones(B, S, 1, device=device)
-            processed_batch = self.data_schematic.normalize_data(processed_batch, embodiment_id)
+            processed_batch[embodiment_id] = self.data_schematic.normalize_data(processed_batch[embodiment_id], embodiment_id)
 
         return processed_batch
 
@@ -957,9 +957,3 @@ class HPT(Algo):
         data["action"] = batch[ac_key]
 
         return data
-
-
-        
-    
-
-    

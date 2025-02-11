@@ -67,8 +67,6 @@ INTRINSICS = {
 class CameraTransforms:
     def __init__(self, intrinsics_key, extrinsics_key):
         self.intrinsics = INTRINSICS[intrinsics_key]
-        # BC we're using 320x240 images now
-        self.intrinsics[:-1] = self.intrinsics[:-1] / 2
         self.extrinsics = EXTRINSICS[extrinsics_key]
 
 ## HPT Utils

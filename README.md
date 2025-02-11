@@ -25,6 +25,7 @@ pip install projectaria-tools'[all]'
 pip install -e external/robomimic
 pip install -e external/rldb
 pip install -e external/rldb/external/lerobot
+mv pyproject.toml pyproject.bak
 pip install -e .
 ```
 # UV
@@ -38,6 +39,7 @@ uv pip install projectaria-tools'[all]'
 uv pip install -e external/robomimic
 uv pip install -e external/rldb
 uv pip install -e external/rldb/external/lerobot
+mv pyproject.toml pyproject.bak
 uv pip install -e .
 ```
 

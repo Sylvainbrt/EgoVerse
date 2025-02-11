@@ -61,28 +61,6 @@ ROTATION_MATRIX = np.array([[0, 1, 0],
                             [-1, 0, 0], 
                             [0, 0, 1]])
 
-
-def transform_actions(actions):
-    #print("Transforming coordinates for actions and ee_pose")
-    if actions.shape[1] == 3:
-        actions[:, 0] *= -1  # Multiply x by -1
-        actions[:, 1] *= -1  # Multiply y by -1
-    elif actions.shape[1] == 6:
-        actions[:, 0] *= -1  # Multiply x by -1 for first set
-        actions[:, 1] *= -1  # Multiply y by -1 for first set
-        actions[:, 3] *= -1  # Multiply x by -1 for second set
-        actions[:, 4] *= -1  # Multiply y by -1 for second set
-    elif actions.shape[1] == 30:
-        for i in range(10):
-            actions[:, 3 * i] *= -1  # Multiply x by -1 for each set
-            actions[:, 3 * i + 1] *= -1  # Multiply y by -1 for each set
-    elif actions.shape[1] == 60:
-        for i in range(20):
-            actions[:, 3 * i] *= -1  # Multiply x by -1 for each set
-            actions[:, 3 * i + 1] *= -1  # Multiply y by -1 for each set
-
-    return actions
-
 def transform_ee_pose(ee_pose):
     if ee_pose.shape[1] == 3:
         ee_pose[:, 0] *= -1  # Multiply x by -1
@@ -356,7 +334,6 @@ class AriaVRSExtractor:
                 actions.append(rotated_actions_t)
 
         actions = np.array(actions)
-        actions = transform_actions(actions)
 
         if not prestack:
             actions = actions[:, 1, :]

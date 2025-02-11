@@ -84,13 +84,15 @@ class ModelWrapper(LightningModule):
 
         ## images is now a dict
         for key, images in images_dict.items():
+            os.makedirs(os.path.join(self.video_dir(), f"epoch_{self.trainer.current_epoch}", str(get_embodiment(key))), exist_ok=True)
             if key not in self.val_image_buffer or self.val_image_buffer[key] is None:
                 self.val_image_buffer[key] = []
+                self.val_counter[key] = 0
             self.val_image_buffer[key].extend(torch.from_numpy(images))
             if len(self.val_image_buffer[key]) >= 1000:
                 frames = torch.stack(self.val_image_buffer[key])
-                path = os.path.join(self.video_dir(), str(get_embodiment(key)), f"epoch_{self.trainer.current_epoch}/validation_video_{self.val_counter}.mp4")
-                tvio.write_video(path, frames, fps=30)
+                path = os.path.join(self.video_dir(), f"epoch_{self.trainer.current_epoch}", str(get_embodiment(key)), f"validation_video_{self.val_counter[key]}.mp4")
+                tvio.write_video(path, frames, fps=30, video_codec="h264")
                 self.val_image_buffer[key].clear()
                 self.val_counter[key] += 1
         
@@ -99,10 +101,11 @@ class ModelWrapper(LightningModule):
     @rank_zero_only
     def on_validation_end(self):
         for key, buffer in self.val_image_buffer.items():
+            os.makedirs(os.path.join(self.video_dir(), f"epoch_{self.trainer.current_epoch}", str(get_embodiment(key))), exist_ok=True)
             if len(buffer) != 0:
                 frames = torch.stack(buffer)
-                path = os.path.join(self.video_dir(), str(get_embodiment(key)), f"epoch_{self.trainer.current_epoch}/validation_video_{self.val_counter}.mp4")
-                tvio.write_video(path, frames, fps=30)
+                path = os.path.join(self.video_dir(), f"epoch_{self.trainer.current_epoch}", str(get_embodiment(key)), f"validation_video_{self.val_counter[key]}.mp4")
+                tvio.write_video(path, frames, fps=30, video_codec="h264")
             
             self.val_counter[key] = 0
             self.val_image_buffer[key] = []
