@@ -1,25 +1,4 @@
 # Using your own data
-
-## Process Human Data for Training
-# Robomimic HDF5
-Collect Aria demonstrations via the Aria App, then transfer them to your computer, make the following structure
-```
-TASK_NAME_ARIA/
-├── rawAria
-│   ├── demo1.vrs
-│   ├── demo1.vrs.json
-...
-│   ├── demoN.vrs
-│   ├── demoN.vrs.json
-└── converted (empty folder)
-```
-
-This will process your aria data into hdf5 format
-```
-cd egomimic
-python scripts/aria_process/aria_to_robomimic.py --dataset /path/to/TASK_NAME_ARIA --out /path/to/converted/TASK_NAME.hdf5 --hand <left, right, or bimanual>
-```
-
 # RLDB Parquet (Built around LeRobot for fast I/O and more compatibility for BC training with features like prestacked actions)
 
 Collect Aria demonstrations via the Aria App, then transfer them to your computer, make the following structure
