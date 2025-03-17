@@ -104,7 +104,6 @@ class HPTModel(nn.Module):
         self.observation_horizon = observation_horizon
         self.action_horizon = action_horizon
         self.token_postprocessing = token_postprocessing
-        self.modalities_tokens = {}
         self.action_tokens = None
         self.stem_spec = {}
         self.head_spec = {}
@@ -148,11 +147,7 @@ class HPTModel(nn.Module):
             self.stems[stem_name] = stem_spec[modality]
             if hasattr(self.stems[stem_name], 'init_cross_attn'):
                 self.stems[stem_name].init_cross_attn(stem_spec[modality].specs.cross_attn)
-
-            self.modalities_tokens[modality] = nn.Parameter(
-                torch.randn(1, 1, stem_spec[modality].specs.cross_attn.modality_embed_dim) * STD_SCALE
-            )
-
+                
     def init_domain_head(self, domain_name, head_spec):
         """
         Initialize the head (prediction module) for a given domain.
@@ -176,7 +171,6 @@ class HPTModel(nn.Module):
         """
         self.stems = nn.ModuleDict(self.stems)
         self.heads = nn.ModuleDict(self.heads)
-        self.modalities_tokens = nn.ParameterDict(self.modalities_tokens)
         self.apply(self._init_weights)
 
         # Shared action tokens

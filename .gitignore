@@ -27,3 +27,4 @@ outputs/
 logs/
 emimic/
 emimic.egg-info/
+pyproject.bak
