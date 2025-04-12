@@ -99,7 +99,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if logger:
         log.info("Logging hyperparameters!")
         log_hyperparameters(object_dict)
-    
+
+    if os.environ.get("SLURM_JOB_ID") and os.environ.get("SLURM_RESTART_COUNT", "0") != "0":
+        last_ckpt_path = os.path.join(trainer.default_root_dir, "checkpoints", "last.ckpt")
+        log.info("Detected SLURM requeue — resuming from 'last.ckpt'")
+        cfg.ckpt_path = last_ckpt_path
+        
     os.makedirs(os.path.join(trainer.default_root_dir, "videos"), exist_ok=True)
 
     if cfg.get("train"):
