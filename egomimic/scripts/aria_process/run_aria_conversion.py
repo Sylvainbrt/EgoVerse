@@ -40,22 +40,39 @@ def convert_one(tmp_dir: str, out_dir: str,
                 dataset_name: str, arm: str) -> tuple[str, int]:
     """
     Run the conversion inside a temp dir.
-    Returns (vrs_stem, total_frames).
+    Returns (vrs_stem, total_frames). On failure, total_frames = -1.
     """
-    lerobot_job(
-        raw_path     = tmp_dir,
-        output_dir   = out_dir,
-        dataset_name = dataset_name,
-        arm          = arm,
-        description  = ""
-    )
-    info_p = Path(out_dir) / dataset_name / "meta/info.json"
-    frames = -1
-    if info_p.exists():
-        frames = int(json.loads(info_p.read_text()).get("total_frames", -1))
+    try:
+        print(f"[INFO] Starting conversion: {dataset_name}", flush=True)
 
-    shutil.rmtree(tmp_dir, ignore_errors=True)
-    return Path(dataset_name).stem, frames
+        lerobot_job(
+            raw_path     = tmp_dir,
+            output_dir   = out_dir,
+            dataset_name = dataset_name,
+            arm          = arm,
+            description  = ""
+        )
+
+        info_p = Path(out_dir) / dataset_name / "meta/info.json"
+        frames = -1
+        if info_p.exists():
+            try:
+                frames = int(json.loads(info_p.read_text()).get("total_frames", -1))
+            except Exception as json_err:
+                print(f"[WARN] Could not parse info.json: {json_err}", flush=True)
+
+        print(f"[INFO] Completed conversion: {dataset_name} ({frames} frames)", flush=True)
+        return Path(dataset_name).stem, frames
+
+    except Exception as e:
+        print(f"[ERROR] Exception during conversion of {dataset_name}: {e}", flush=True)
+        return Path(dataset_name).stem, -1
+
+    finally:
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception as cleanup_err:
+            print(f"[WARN] Failed to clean up {tmp_dir}: {cleanup_err}", flush=True)
 
 def launch(dry_run: bool = False):
     jobs: list[tuple[ray.ObjectRef, Path]] = []
