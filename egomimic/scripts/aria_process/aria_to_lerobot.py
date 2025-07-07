@@ -56,7 +56,7 @@ from scipy.spatial.transform import Rotation as R
 
 
 ## CHANGE THIS TO YOUR DESIRED CACHE FOR HF
-os.environ["HF_HOME"] = "/storage/cedar/cedar0/cedarp-dxu345-0/rpunamiya6/.cache/huggingface"
+os.environ["HF_HOME"] = "~/.cache/huggingface"
 
 HORIZON_DEFAULT = 10
 STEP_DEFAULT = 3.0
@@ -659,7 +659,8 @@ class AriaVRSExtractor:
                     right_obs_t = np.concatenate((right_palm_pose, right_palm_euler), axis=None)
 
                 ee_pose_obs_t = np.concatenate((left_obs_t, right_obs_t), axis=None)
-            
+            else:
+                print(f"[WARNING]: INCORRECT ARM PROVIDED : {arm}")
             ee_pose.append(np.ravel(ee_pose_obs_t))
         ee_pose = np.array(ee_pose)
         if no_rot:
