@@ -915,6 +915,7 @@ class DatasetConverter:
         self.logger.info(f"#writer processes: {self.image_writer_processes}")
         self.logger.info(f"#writer threads: {self.image_writer_threads}")
 
+        
         self.episode_list = list(self.raw_path.glob("*.vrs"))
         self.buffer = []
 
@@ -922,7 +923,7 @@ class DatasetConverter:
             self.episode_list = self.episode_list[:2]
 
         processed_episode = AriaVRSExtractor.process_episode(
-            episode_path=self.episode_list[-1],
+            episode_path=self.episode_list[0],
             arm=self.arm,
             prestack=self.prestack,
         )

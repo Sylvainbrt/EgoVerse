@@ -32,8 +32,7 @@ def ensure_path_ready(p: str, retries: int = 30) -> bool:
 
 def load_task_map() -> dict[str, str]:
     with TASK_MAP_CSV.open() as f:
-        return {r["task"].strip(): r["arm"].strip().lower()
-                for r in csv.DictReader(f)}
+        return {r["task"].strip(): r["arm"].strip().lower() for r in csv.DictReader(f)}
 
 def already_done() -> set[str]:
     if not GLOBAL_STATUS.exists():
