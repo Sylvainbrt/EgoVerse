@@ -37,3 +37,6 @@ transformers
 timm
 boto3
 ray
+abc
+geomloss
+tslearn
