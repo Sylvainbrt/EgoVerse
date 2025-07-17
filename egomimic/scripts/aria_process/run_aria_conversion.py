@@ -181,13 +181,16 @@ def launch(dry: bool = False):
         task, vrs_stem  = pending.pop(done_ref[0])
         vrs_path = RAW_ROOT / task / f"{vrs_stem}.vrs"
         meta = load_meta_fields(vrs_path)
-
-        lab_name = meta.get("lab_name", extract_lab_name(vrs_stem, task))
-
+        
+        resolved_task = meta.get("task", task).strip()
+        lab_name = meta.get("lab", extract_lab_name(vrs_stem, resolved_task)).strip()
+        task_map = load_task_map()
+        resolved_arm = meta.get("arm", task_map.get(resolved_task, "unknown")).strip()
         row = {
-            "task": meta.get("task", task),
-            "lab": meta.get("lab", lab_name),
+            "task": resolved_task,
+            "lab": lab_name,
             "vrs": vrs_stem,
+            "arm": resolved_arm,
             "total_frames": frames,
             "output_path": ds_path,
             **meta  # add any other metadata
