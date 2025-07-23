@@ -34,7 +34,7 @@ launch_params:
 
 data_schematic: # Dynamically fill in these shapes from the dataset
   _target_: rldb.utils.DataSchematic
-  norm_mode: minmax
+  norm_mode: quantile
   schematic_dict:
     eve_bimanual:
       front_img_1: #batch key
