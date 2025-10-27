@@ -64,7 +64,6 @@ setup_commands:
       if mountpoint -q /mnt/raw; then
         echo "/mnt/raw already mounted"
       else
-        # Mount bucket prefix so that /mnt/raw/aria exists (matches your code)
         sudo s3fs rldb:/raw_v2/aria /mnt/raw \
           -o url=https://s3.us-east-2.amazonaws.com \
           -o iam_role=auto \
