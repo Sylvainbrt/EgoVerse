@@ -257,8 +257,12 @@ def launch(dry: bool = False, skip_if_done: bool = False):
             print(f"[WARN] Episode {episode_key}: row disappeared before update?")
             continue
         
-        breakpoint()
-            
+        print(f"[DEBUG_BEFORE_NUM_FRAMES] episode_key={episode_key}")
+        print(f"[DEBUG_BEFORE_NUM_FRAMES] ds_path={ds_path}")
+        print(f"[DEBUG_BEFORE_NUM_FRAMES] mp4_path={mp4_path}")
+        print(f"[DEBUG_BEFORE_NUM_FRAMES] frames={frames} type={type(frames)}")
+        print(f"[DEBUG_BEFORE_NUM_FRAMES] row={row}")
+        
         row.num_frames = frames if isinstance(frames, int) else -1
         
         if row.num_frames > 0:
