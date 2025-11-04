@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Iterator, Tuple
 
 import ray
+import traceback
 
 # --- Conversion wrapper ------------------------------------------------------
 from aria_helper import lerobot_job
@@ -137,6 +138,7 @@ def convert_one_bundle(
     for t in targets:
         if not ensure_path_ready(t):
             print(f"[ERR] missing {t}", flush=True)
+            traceback.print_exc()
             shutil.rmtree(tmp_dir, ignore_errors=True)
             return "", "", -1
         link = tmp_dir / t.name
@@ -263,7 +265,7 @@ def launch(dry: bool = False, skip_if_done: bool = False):
         print(f"[DEBUG_BEFORE_NUM_FRAMES] frames={frames} type={type(frames)}")
         print(f"[DEBUG_BEFORE_NUM_FRAMES] row={row}")
         
-        row.num_frames = frames if isinstance(frames, int) else -1
+        row.num_frames = frames
         
         if row.num_frames > 0:
             row.processed_path = _map_processed_local_to_remote(ds_path)
