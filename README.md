@@ -24,8 +24,7 @@ cd EgoVerse
 conda env create -f environment.yaml
 conda activate emimic
 pip install projectaria-tools'[all]'==1.5.7
-pip install -e external/rldb
-pip install -e external/rldb/external/lerobot
+pip install -e external/lerobot
 pip install -e .
 ```
 # UV
