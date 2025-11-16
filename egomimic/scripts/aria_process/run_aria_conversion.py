@@ -98,10 +98,10 @@ def iter_vrs_bundles(root: Path) -> Iterator[Tuple[Path, Path, Path]]:
 
 def infer_arm_from_row(row: TableRow) -> str:
     """
-    Infer arm from SQL row.embodiment (e.g., 'aria_left', 'aria_right', 'aria_bimanual').
+    Infer arm from SQL row.robot_name (e.g., 'aria_left', 'aria_right', 'aria_bimanual').
     Falls back to 'bimanual'.
     """
-    emb = (row.embodiment or "").lower()
+    emb = (row.robot_name or "").lower()
     if "left" in emb:
         return "left"
     if "right" in emb:
