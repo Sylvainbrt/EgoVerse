@@ -118,7 +118,7 @@ def _load_episode_hash(episode_hash: Path) -> str | None:
 
 
 # --- Ray task ----------------------------------------------------------------
-@ray.remote(num_cpus=24, memory=48 * 1024**3)
+@ray.remote(num_cpus=8, memory=30 * 1024**3)
 def convert_one_bundle(
     vrs: str,
     jsonf: str,
