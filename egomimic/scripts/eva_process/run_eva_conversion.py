@@ -101,7 +101,7 @@ def _load_episode_key(name: str) -> str | None:
         return name
 
 
-@ray.remote(num_cpus=24, memory=48 * 1024**3)
+@ray.remote(num_cpus=8)
 def convert_one_bundle(
     data_h5: str,
     out_dir: str,
