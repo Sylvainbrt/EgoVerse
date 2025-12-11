@@ -32,6 +32,8 @@ def parse_args():
 
     parser.add_argument("--store-matrix", action="store_true")
 
+    parser.add_argument("--every-k", type=int, default=5, help="sample every k frames")
+
     return parser.parse_args()
 
 
@@ -113,7 +115,7 @@ def main():
     for key in calib.keys():
         demo = calib[key]
         T, H, W, _ = demo["obs/front_img_1"].shape
-        for t in tqdm(range(T)):
+        for t in tqdm(range(0, T, args.every_k)):
             img = demo["obs/front_img_1"][t]
             # img = cv2.undistort(
             #     img, WIDE_LENS_ROBOT_LEFT_K[:, :3], WIDE_LENS_ROBOT_LEFT_D
@@ -123,7 +125,7 @@ def main():
                 img,
                 intrinsics=intrinsics["color"],
                 # tag_size=0.0958)
-                tag_size=0.1,
+                tag_size=0.15875,
             )
 
             if len(detect_result) != 1:
@@ -142,7 +144,7 @@ def main():
 
             # Optional: Reprojection check to validate intrinsics / tag size
             proj, resid = reproject_tag_corners(
-                detect_result[0], intrinsics["color"], tag_size=0.1
+                detect_result[0], intrinsics["color"], tag_size=0.15875
             )
             if args.debug:
                 print(
@@ -194,7 +196,7 @@ def main():
     print(f"==========Missed {missed_count} images================")
 
     for method in [
-        cv2.CALIB_HAND_EYE_TSAI,
+        # cv2.CALIB_HAND_EYE_TSAI,
         cv2.CALIB_HAND_EYE_PARK,
         # cv2.CALIB_HAND_EYE_DANIILIDIS,
         # cv2.CALIB_HAND_EYE_ANDREFF,
