@@ -37,6 +37,7 @@ import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as R
 
 from enum import Enum
+import errno
 
 ## CHANGE THIS TO YOUR DESIRED CACHE FOR HF
 os.environ["HF_HOME"] = "~/.cache/huggingface"
@@ -57,6 +58,21 @@ CHUNK_LENGTH_BASE = 100  # number of interpolated points per chunk
 
 Array2D = Union[np.ndarray, torch.Tensor]
 
+def rmtree_with_wait(path: Path, tries: int = 10, base_sleep: float = 0.05):
+    path = Path(path)
+    if not path.exists():
+        return
+    for i in range(tries):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as e:
+            if e.errno in (errno.ENOTEMPTY, errno.EBUSY, errno.EPERM):
+                time.sleep(base_sleep * (2 ** i))
+                continue
+            raise
+    shutil.rmtree(path)
+    
 def _to_numpy(x):
     """Convert torch / numpy / anything array-like to np.ndarray."""
     if isinstance(x, np.ndarray):
@@ -83,120 +99,93 @@ def _row_to_numpy(x: Array2D, i: int) -> np.ndarray:
 
 def _wrap_to_pi(x: np.ndarray) -> np.ndarray:
     return (x + np.pi) % (2 * np.pi) - np.pi
-
 def assert_fk_matches_eepose(
     actions_base_cartesian: np.ndarray,
     actions_eepose: np.ndarray,
     *,
+    arm: str = "both",
     atol_pose: float = 2e-4,
     rtol_pose: float = 0.0,
-    mismatch_frac_threshold: float = 0.01,  # warn only if >1%
+    mismatch_frac_threshold: float = 0.01,
     skip_first: int = 1,
     zero_eps: float = 1e-12,
 ):
-    """
-    FK vs eepose consistency check.
-    Prints a WARNING instead of asserting if mismatch-rate is high.
-    """
-
-    base0 = actions_base_cartesian[:, 0] if actions_base_cartesian.ndim == 3 else actions_base_cartesian
+    # prestack handling
+    base0 = (
+        actions_base_cartesian[:, 0]
+        if actions_base_cartesian.ndim == 3
+        else actions_base_cartesian
+    )
     eep = actions_eepose
 
-    if base0.shape != eep.shape:
-        print(f"[FK WARNING] Shape mismatch: base0={base0.shape} vs eepose={eep.shape}")
+    if eep.ndim != 2 or eep.shape[1] != 14:
+        print(f"[FK WARNING] Expected eepose (T,14), got {eep.shape}")
         return
 
-    T, D = base0.shape
+    if base0.ndim != 2:
+        print(f"[FK WARNING] Expected base_cartesian 2D, got {base0.shape}")
+        return
+
+    if base0.shape[0] != eep.shape[0]:
+        print(f"[FK WARNING] T mismatch: base={base0.shape}, eepose={eep.shape}")
+        return
+
+    T = eep.shape[0]
     idx_all = np.arange(T)
 
-    # ============================
-    # Bimanual case (D == 14)
-    # ============================
-    if D == 14:
-        # [L xyz(0:3) ypr(3:6) g(6) | R xyz(7:10) ypr(10:13) g(13)]
-        L_pos = [0, 1, 2]
-        L_ang = [3, 4, 5]
-        R_pos = [7, 8, 9]
-        R_ang = [10, 11, 12]
+    # --------------------------------------------------
+    # dimension layout
+    # --------------------------------------------------
+    # base_cartesian:
+    #   arm=left/right : (T,7)  -> [x y z yaw pitch roll g]
+    #   arm=both       : (T,14) -> [L pose g | R pose g]
+    #
+    # eepose (always):
+    #   [L xyz ypr g | R xyz ypr g]
+    # --------------------------------------------------
 
-        left_valid = (np.abs(eep[:, L_pos + L_ang]) > zero_eps).any(axis=1)
-        right_valid = (np.abs(eep[:, R_pos + R_ang]) > zero_eps).any(axis=1)
+    if arm == "left":
+        b_pos = [0, 1, 2]
+        b_ang = [3, 4, 5]
+        e_pos = [0, 1, 2]
+        e_ang = [3, 4, 5]
+        arm_name = "left"
 
-        if skip_first > 0:
-            left_valid[:skip_first] = False
-            right_valid[:skip_first] = False
-
-        compared = left_valid | right_valid
-        if not compared.any():
+        if base0.shape[1] != 7:
+            print(f"[FK WARNING] base_cartesian expected (T,7) for left, got {base0.shape}")
             return
 
-        comp_idx = idx_all[compared]
-        b_comp = base0[compared]
-        a_comp = eep[compared]
+    elif arm == "right":
+        b_pos = [0, 1, 2]
+        b_ang = [3, 4, 5]
+        e_pos = [7, 8, 9]
+        e_ang = [10, 11, 12]
+        arm_name = "right"
 
-        viol = np.zeros(comp_idx.shape[0], dtype=bool)
-
-        # ---- LEFT arm ----
-        lv = left_valid[compared]
-        if lv.any():
-            bL = b_comp[lv]
-            aL = a_comp[lv]
-
-            dpos = bL[:, L_pos] - aL[:, L_pos]
-            tolpos = atol_pose + rtol_pose * np.abs(aL[:, L_pos])
-            violL = (np.abs(dpos) > tolpos).any(axis=1)
-
-            dang = bL[:, L_ang] - aL[:, L_ang]
-            dang = (dang + np.pi) % (2 * np.pi) - np.pi
-            tolang = atol_pose + rtol_pose * np.abs(aL[:, L_ang])
-            violL |= (np.abs(dang) > tolang).any(axis=1)
-
-            viol[lv] |= violL
-
-        # ---- RIGHT arm ----
-        rv = right_valid[compared]
-        if rv.any():
-            bR = b_comp[rv]
-            aR = a_comp[rv]
-
-            dpos = bR[:, R_pos] - aR[:, R_pos]
-            tolpos = atol_pose + rtol_pose * np.abs(aR[:, R_pos])
-            violR = (np.abs(dpos) > tolpos).any(axis=1)
-
-            dang = bR[:, R_ang] - aR[:, R_ang]
-            dang = (dang + np.pi) % (2 * np.pi) - np.pi
-            tolang = atol_pose + rtol_pose * np.abs(aR[:, R_ang])
-            violR |= (np.abs(dang) > tolang).any(axis=1)
-
-            viol[rv] |= violR
-
-        mismatch_frac = float(viol.mean())
-        if mismatch_frac <= mismatch_frac_threshold:
+        if base0.shape[1] != 7:
+            print(f"[FK WARNING] base_cartesian expected (T,7) for right, got {base0.shape}")
             return
 
-        bad_ts = comp_idx[viol]
-        show = bad_ts[:20].tolist()
-        extra = "" if bad_ts.size <= 20 else f" ... (+{bad_ts.size - 20} more)"
-        print(
-            f"[FK WARNING] FK/eepose mismatch rate {mismatch_frac*100:.3f}% "
-            f"({int(viol.sum())}/{int(viol.size)} compared rows). "
-            f"First bad timesteps: {show}{extra}. "
-            f"(atol={atol_pose}, rtol={rtol_pose})"
-        )
+    elif arm == "both":
+        b_pos = [0, 1, 2, 7, 8, 9]
+        b_ang = [3, 4, 5, 10, 11, 12]
+        e_pos = [0, 1, 2, 7, 8, 9]
+        e_ang = [3, 4, 5, 10, 11, 12]
+        arm_name = "both"
+
+        if base0.shape[1] != 14:
+            print(f"[FK WARNING] base_cartesian expected (T,14) for both, got {base0.shape}")
+            return
+
+    else:
+        print(f"[FK WARNING] Unknown arm='{arm}'")
         return
 
-    # ============================
-    # Single-arm / generic case
-    # ============================
-    if D == 7:
-        pos_dims = [0, 1, 2]
-        ang_dims = [3, 4, 5]
-    else:
-        pos_dims = list(range(0, min(3, D)))
-        ang_dims = list(range(3, min(6, D)))
-
-    pose_dims = pos_dims + ang_dims
-    valid = (np.abs(eep[:, pose_dims]) > zero_eps).any(axis=1)
+    # --------------------------------------------------
+    # validity mask (eepose only)
+    # --------------------------------------------------
+    pose_dims_e = e_pos + e_ang
+    valid = (np.abs(eep[:, pose_dims_e]) > zero_eps).any(axis=1)
     if skip_first > 0:
         valid[:skip_first] = False
 
@@ -207,15 +196,20 @@ def assert_fk_matches_eepose(
     a = eep[valid]
     v_idx = idx_all[valid]
 
-    dpos = b[:, pos_dims] - a[:, pos_dims]
-    tolpos = atol_pose + rtol_pose * np.abs(a[:, pos_dims])
+    # --------------------------------------------------
+    # position diff
+    # --------------------------------------------------
+    dpos = b[:, b_pos] - a[:, e_pos]
+    tolpos = atol_pose + rtol_pose * np.abs(a[:, e_pos])
     viol = (np.abs(dpos) > tolpos).any(axis=1)
 
-    if ang_dims:
-        dang = b[:, ang_dims] - a[:, ang_dims]
-        dang = (dang + np.pi) % (2 * np.pi) - np.pi
-        tolang = atol_pose + rtol_pose * np.abs(a[:, ang_dims])
-        viol |= (np.abs(dang) > tolang).any(axis=1)
+    # --------------------------------------------------
+    # angle diff (inline wrap)
+    # --------------------------------------------------
+    dang = b[:, b_ang] - a[:, e_ang]
+    dang = (dang + np.pi) % (2 * np.pi) - np.pi
+    tolang = atol_pose + rtol_pose * np.abs(a[:, e_ang])
+    viol |= (np.abs(dang) > tolang).any(axis=1)
 
     mismatch_frac = float(viol.mean())
     if mismatch_frac <= mismatch_frac_threshold:
@@ -224,13 +218,15 @@ def assert_fk_matches_eepose(
     bad_ts = v_idx[viol]
     show = bad_ts[:20].tolist()
     extra = "" if bad_ts.size <= 20 else f" ... (+{bad_ts.size - 20} more)"
-    print(
-        f"[FK WARNING] FK/eepose mismatch rate {mismatch_frac*100:.3f}% "
-        f"({int(viol.sum())}/{int(viol.size)} compared rows). "
-        f"First bad timesteps: {show}{extra}. "
-        f"(atol={atol_pose}, rtol={rtol_pose})"
-    )
 
+    print(
+        f"[FK WARNING] ({arm_name}) FK/eepose mismatch rate "
+        f"{mismatch_frac*100:.3f}% "
+        f"({int(viol.sum())}/{int(viol.size)} rows). "
+        f"First bad timesteps: {show}{extra}. "
+        f"(atol={atol_pose}, rtol={rtol_pose}, skip_first={skip_first})"
+    )
+    
 def print_fk_eepose_diffs(
     actions_base_cartesian: np.ndarray,
     actions_eepose: np.ndarray,
@@ -678,7 +674,7 @@ class EvaHD5Extractor:
             #     skip_first=1,
             #     max_rows=500,   # set huge if you truly want “all”
             # )
-            assert_fk_matches_eepose(base_cartesian_actions, episode["actions"]["eepose"][:])
+            assert_fk_matches_eepose(base_cartesian_actions, episode["actions"]["eepose"][:], arm=arm)
 
             episode_feats["actions_joints"] = joint_actions
             episode_feats["actions_cartesian"] = cartesian_actions
@@ -1544,7 +1540,7 @@ class DatasetConverter:
         """
         # Clean the cache if the dataset already exists
         if os.path.exists(output_dir / name):
-            shutil.rmtree(output_dir / name)
+            rmtree_with_wait(output_dir / name)
 
         self._out_base = Path(output_dir)
 
