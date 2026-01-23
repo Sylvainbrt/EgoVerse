@@ -96,12 +96,13 @@ fi
 
 # Build policy document
 policy_file="$(mktemp)"
+delete_action=""
+if [[ "$allow_delete" == "true" ]]; then
+  delete_action='        "s3:DeleteObject",'
+fi
+
 if [[ -n "$prefix" ]]; then
   object_arn="arn:aws:s3:::${bucket}/${prefix}*"
-  delete_action=""
-  if [[ "$allow_delete" == "true" ]]; then
-    delete_action=',\n        "s3:DeleteObject"'
-  fi
   cat >"$policy_file" <<POLICY
 {
   "Version": "2012-10-17",
@@ -122,7 +123,8 @@ if [[ -n "$prefix" ]]; then
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
-        "s3:PutObject"${delete_action},
+        "s3:PutObject",
+${delete_action}
         "s3:AbortMultipartUpload",
         "s3:ListMultipartUploadParts"
       ],
@@ -133,10 +135,6 @@ if [[ -n "$prefix" ]]; then
 POLICY
 else
   object_arn="arn:aws:s3:::${bucket}/*"
-  delete_action=""
-  if [[ "$allow_delete" == "true" ]]; then
-    delete_action=',\n        "s3:DeleteObject"'
-  fi
   cat >"$policy_file" <<POLICY
 {
   "Version": "2012-10-17",
@@ -152,7 +150,8 @@ else
       "Effect": "Allow",
       "Action": [
         "s3:GetObject",
-        "s3:PutObject"${delete_action},
+        "s3:PutObject",
+${delete_action}
         "s3:AbortMultipartUpload",
         "s3:ListMultipartUploadParts"
       ],
