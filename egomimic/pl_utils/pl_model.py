@@ -52,6 +52,15 @@ class ModelWrapper(LightningModule):
     def video_dir(self):
         return os.path.join(self.root_dir(), "videos")
 
+    def _sync_skip(self, skip: bool, device: torch.device) -> bool:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            t = torch.tensor(int(skip), device=device)
+            torch.distributed.all_reduce(
+                t, op=torch.distributed.ReduceOp.MAX
+            )  # any rank => all skip
+            return bool(t.item())
+        return skip
+
     # batch is now a dict, handle on model side
     def training_step(self, batch, batch_idx):
         self.train()
@@ -77,31 +86,29 @@ class ModelWrapper(LightningModule):
         self.step_log_all_train.append(self.model.log_info(info))
 
         loss = losses["action_loss"]
-
-        if not torch.isfinite(loss):
-            if self.global_rank == 0:
-                print(
-                    f"[SKIP] Non-finite loss at batch {batch_idx}: {loss.item()}",
-                    flush=True,
-                )
-            return None
-
         loss_val = loss.detach()
 
+        # init EMA
         if self.loss_ema is None:
             self.loss_ema = loss_val
             return loss
 
         prev_ema = self.loss_ema
-        if loss_val > self.loss_spike_factor * prev_ema:
-            if self.global_rank == 0:
+
+        local_spike = (loss_val > self.loss_spike_factor * prev_ema).item()
+
+        skip = self._sync_skip(local_spike, device=loss.device)
+
+        if skip:
+            if self.trainer.is_global_zero and local_spike:
                 print(
                     f"[SKIP] Loss spike at batch {batch_idx}: "
                     f"{loss_val.item():.4f} (EMA {prev_ema.item():.4f})",
                     flush=True,
                 )
-            return None
+            return loss * 0.0  # zero update, safe in DDP
 
+        # update EMA only if not skipping
         self.loss_ema = (
             self.loss_ema_decay * self.loss_ema + (1.0 - self.loss_ema_decay) * loss_val
         )
