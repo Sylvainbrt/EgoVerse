@@ -7,7 +7,6 @@ import tempfile
 import traceback
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from enum import Enum
 from pathlib import Path
 
 import boto3
@@ -30,6 +29,10 @@ from egomimic.rldb.data_utils import (
     _slow_down_slerp_quat,
     _ypr_to_quat,
 )
+from egomimic.rldb.embodiment import (
+    EMBODIMENT_ID_TO_KEY,
+    get_embodiment_id,
+)
 from egomimic.utils.aws.aws_sql import (
     create_default_engine,
     episode_table_to_df,
@@ -42,31 +45,7 @@ logging.getLogger("datasets").setLevel(logging.ERROR)
 
 logging.getLogger("huggingface_hub._snapshot_download").setLevel(logging.ERROR)
 
-
-class EMBODIMENT(Enum):
-    EVE_RIGHT_ARM = 0
-    EVE_LEFT_ARM = 1
-    EVE_BIMANUAL = 2
-    ARIA_RIGHT_ARM = 3
-    ARIA_LEFT_ARM = 4
-    ARIA_BIMANUAL = 5
-    EVA_RIGHT_ARM = 6
-    EVA_LEFT_ARM = 7
-    EVA_BIMANUAL = 8
-    MECKA_BIMANUAL = 9
-    MECKA_RIGHT_ARM = 10
-    MECKA_LEFT_ARM = 11
-    SCALE_BIMANUAL = 12
-    SCALE_RIGHT_ARM = 13
-    SCALE_LEFT_ARM = 14
-
-
 SEED = 42
-
-
-EMBODIMENT_ID_TO_KEY = {
-    member.value: key for key, member in EMBODIMENT.__members__.items()
-}
 
 
 def split_dataset_names(dataset_names, valid_ratio=0.2, seed=SEED):
@@ -100,15 +79,6 @@ def split_dataset_names(dataset_names, valid_ratio=0.2, seed=SEED):
     valid = set(names[:n_valid])
     train = set(names[n_valid:])
     return train, valid
-
-
-def get_embodiment(index):
-    return EMBODIMENT_ID_TO_KEY.get(index, None)
-
-
-def get_embodiment_id(embodiment_name):
-    embodiment_name = embodiment_name.upper()
-    return EMBODIMENT[embodiment_name].value
 
 
 def nds(nested_ds, tab_level=0):
@@ -475,9 +445,9 @@ class MultiRLDBDataset(torch.utils.data.Dataset):
 
         self.embodiment = get_embodiment_id(embodiment)
         for dataset_name, dataset in self.datasets.items():
-            assert dataset.embodiment == self.embodiment, (
-                f"Dataset {dataset_name} has embodiment {dataset.embodiment}, expected {self.embodiment}."
-            )
+            assert (
+                dataset.embodiment == self.embodiment
+            ), f"Dataset {dataset_name} has embodiment {dataset.embodiment}, expected {self.embodiment}."
 
         self.index_map = []
         for dataset_name, dataset in self.datasets.items():

@@ -9,7 +9,7 @@ import torchvision.io as tvio
 from lightning import LightningModule
 
 import egomimic.utils.tensor_utils as TensorUtils
-from egomimic.rldb.utils import get_embodiment
+from egomimic.rldb.embodiment import get_embodiment
 
 
 class ModelWrapper(LightningModule):

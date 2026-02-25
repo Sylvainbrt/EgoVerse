@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as R
 
 import egomimic
-from egomimic.rldb.utils import EMBODIMENT
+from egomimic.rldb.embodiment import EMBODIMENT
 from egomimic.robot.eva.eva_kinematics import EvaMinkKinematicsSolver
 from egomimic.utils.egomimicUtils import (
     ee_orientation_to_cam_frame,

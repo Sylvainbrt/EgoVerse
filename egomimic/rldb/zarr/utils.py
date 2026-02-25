@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from egomimic.rldb.utils import get_embodiment_id
+from egomimic.rldb.embodiment import get_embodiment_id
 from egomimic.rldb.zarr.zarr_dataset_multi import MultiDataset, ZarrDataset
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,6 @@ def set_global_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
 
     os.environ["PYTHONHASHSEED"] = str(seed)
-
-
-set_global_seed(42)
 
 
 class DataSchematic(object):

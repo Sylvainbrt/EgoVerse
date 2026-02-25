@@ -9,7 +9,7 @@ from lightning.pytorch.loggers import Logger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
 from omegaconf import DictConfig, OmegaConf
 
-from egomimic.rldb.zarr.utils import DataSchematic
+from egomimic.rldb.zarr.utils import DataSchematic, set_global_seed
 from egomimic.scripts.evaluation.eval import Eval
 from egomimic.utils.instantiators import instantiate_callbacks, instantiate_loggers
 from egomimic.utils.logging_utils import log_hyperparameters
@@ -35,6 +35,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
 
+        set_global_seed(cfg.seed)
+    else:
+        raise ValueError("Seed must be provided in cfg for reproducibility!")
+
     # log.info(f"Instantiating data schematic <{cfg.data_schematic._target_}>")
 
     data_schematic: DataSchematic = hydra.utils.instantiate(cfg.data_schematic)
@@ -53,9 +57,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         )
 
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")
-    assert "MultiDataModuleWrapper" in cfg.data._target_, (
-        "cfg.data._target_ must be 'MultiDataModuleWrapper'"
-    )
+    assert (
+        "MultiDataModuleWrapper" in cfg.data._target_
+    ), "cfg.data._target_ must be 'MultiDataModuleWrapper'"
     datamodule: LightningDataModule = hydra.utils.instantiate(
         cfg.data, train_datasets=train_datasets, valid_datasets=valid_datasets
     )

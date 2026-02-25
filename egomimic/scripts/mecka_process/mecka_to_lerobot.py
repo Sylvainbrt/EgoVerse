@@ -19,7 +19,7 @@ import pandas as pd
 import torch
 from scipy.spatial.transform import Rotation
 
-from egomimic.rldb.utils import EMBODIMENT
+from egomimic.rldb.embodiment import EMBODIMENT
 
 sys.path.insert(0, str(Path(__file__).parent / "lerobot"))
 

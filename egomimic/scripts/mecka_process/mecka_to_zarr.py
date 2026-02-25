@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
 
-from egomimic.rldb.utils import EMBODIMENT
+from egomimic.rldb.embodiment import EMBODIMENT
 from egomimic.rldb.zarr.zarr_writer import ZarrWriter
 
 logging.basicConfig(level=logging.INFO)

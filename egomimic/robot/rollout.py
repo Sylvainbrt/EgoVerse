@@ -12,10 +12,8 @@ from robot_utils import RateLoop
 # from egomimic.algo import *
 from egomimic.models.denoising_policy import DenoisingPolicy
 from egomimic.pl_utils.pl_model import ModelWrapper
-from egomimic.rldb.utils import (
-    RLDBDataset,
-    get_embodiment,
-)
+from egomimic.rldb.embodiment import get_embodiment
+from egomimic.rldb.utils import RLDBDataset
 from egomimic.robot.eva.eva_kinematics import EvaMinkKinematicsSolver
 from egomimic.utils.egomimicUtils import (
     CameraTransforms,
