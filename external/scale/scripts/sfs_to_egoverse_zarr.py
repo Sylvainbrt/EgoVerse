@@ -12,6 +12,13 @@ Output keys per episode:
     obs_head_pose                    (T, 7)         xyz + quat(w, x, y, z)
     images.front_1                   (T, H, W, 3)   JPEG-compressed by ZarrWriter
 
+Filtering:
+  Frames are dropped when:
+    - Either hand has missing keypoint predictions
+    - Frame falls within a Hand Tracking Error annotation range
+    - Frame falls within an Inactive Time collector issue range
+  Only contiguous runs of valid frames are kept as sub-episodes.
+
 Usage:
   python sfs_to_egoverse_zarr.py --task-ids TASK1 TASK2 --output-dir ./zarr_out
 """
@@ -21,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -38,7 +46,9 @@ from egomimic.rldb.zarr.zarr_writer import ZarrWriter
 
 from scale_api import (
     download_from_simple_response_dict,
+    get_intrinsics,
     get_simple_response_dict_egocentric,
+    load_scene,
 )
 from sfs_data import (
     INVALID_VALUE,
@@ -49,8 +59,8 @@ from sfs_data import (
     compute_wrist_6dof,
 )
 
-ACTION_WINDOW = 30
 SUB_EPISODE_LENGTH = 300
+MIN_EPISODE_FRAMES = 10
 IMAGE_SIZE = (640, 480)  # (W, H) for cv2.resize
 
 
@@ -104,6 +114,118 @@ def _resize_and_encode(frame: np.ndarray) -> tuple[tuple[int, ...], bytes]:
         resized, quality=ZarrWriter.JPEG_QUALITY, colorspace="RGB"
     )
     return resized.shape, jpeg
+
+
+# ---------------------------------------------------------------------------
+# Preview MP4
+# ---------------------------------------------------------------------------
+
+
+def _save_preview_mp4(
+    image_frames: list[np.ndarray],
+    output_path: Path,
+    fps: int = 30,
+) -> None:
+    """Save a half-resolution H.264 preview video via ffmpeg."""
+    if not image_frames:
+        return
+    H, W = image_frames[0].shape[:2]
+    out_w, out_h = (W // 2) & ~1, (H // 2) & ~1
+    if out_w <= 0 or out_h <= 0:
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        print(f"  [preview] ffmpeg not found, skipping {output_path.name}")
+        return
+
+    cmd = [
+        ffmpeg, "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{out_w}x{out_h}", "-r", str(fps),
+        "-i", "-",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-profile:v", "baseline", "-level", "3.0",
+        "-movflags", "+faststart", "-preset", "veryfast", "-crf", "23",
+        str(output_path),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    for frame in image_frames:
+        resized = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+        proc.stdin.write(resized.tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        stderr = proc.stderr.read().decode(errors="replace")
+        print(f"  [preview] ffmpeg failed for {output_path.name}: {stderr[:200]}")
+    else:
+        print(f"  [preview] saved {output_path.name}")
+
+
+# ---------------------------------------------------------------------------
+# Frame validity
+# ---------------------------------------------------------------------------
+
+
+def _build_validity_mask(frames: list[FrameData], video_frame_count: int) -> np.ndarray:
+    """Boolean mask: True = frame has valid hand tracking and no errors."""
+    n = len(frames)
+    mask = np.ones(n, dtype=bool)
+    drop_reasons: dict[str, int] = {
+        "missing_left_hand": 0,
+        "missing_right_hand": 0,
+        "hand_tracking_error": 0,
+        "inactive_time": 0,
+        "beyond_video": 0,
+    }
+    for i, frame in enumerate(frames):
+        if frame.hand_keypoints.left is None:
+            mask[i] = False
+            drop_reasons["missing_left_hand"] += 1
+            continue
+        if frame.hand_keypoints.right is None:
+            mask[i] = False
+            drop_reasons["missing_right_hand"] += 1
+            continue
+        if frame.hand_tracking_error is not None:
+            mask[i] = False
+            drop_reasons["hand_tracking_error"] += 1
+            continue
+        if (
+            frame.collector_issue is not None
+            and frame.collector_issue.get("issue_type") == "Inactive Time"
+        ):
+            mask[i] = False
+            drop_reasons["inactive_time"] += 1
+            continue
+        if i >= video_frame_count:
+            mask[i] = False
+            drop_reasons["beyond_video"] += 1
+
+    valid_count = int(mask.sum())
+    total = len(frames)
+    dropped = total - valid_count
+    print(f"  Validity: {valid_count}/{total} frames kept ({dropped} dropped)")
+    for reason, count in drop_reasons.items():
+        if count > 0:
+            print(f"    {reason}: {count}")
+    return mask
+
+
+def _contiguous_runs(mask: np.ndarray, min_length: int) -> list[list[int]]:
+    """Extract contiguous runs of True indices from a boolean mask."""
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for i, val in enumerate(mask):
+        if val:
+            current.append(i)
+        else:
+            if len(current) >= min_length:
+                runs.append(current)
+            current = []
+    if len(current) >= min_length:
+        runs.append(current)
+    return runs
 
 
 # ---------------------------------------------------------------------------
@@ -200,11 +322,48 @@ def convert_task_to_zarr(
         extractor = SFSDataExtractor(sfs_path, annotations_path, video_path)
     frames = extractor.extract_all_frames_metadata()
     n_frames = len(frames)
-    if n_frames <= ACTION_WINDOW:
+    if n_frames < MIN_EPISODE_FRAMES:
         raise ValueError(f"Task {task_id} has too few frames ({n_frames})")
 
     task_desc = _task_description(frames, extractor.demonstration_metadata)
-    valid_frame_count = n_frames - ACTION_WINDOW
+
+    # Extract and scale intrinsics to output image resolution
+    raw_intrinsics = get_intrinsics(
+        load_scene(sfs_path), "left_rectified"
+    )
+    camera_intrinsics: dict[str, Any] | None = None
+    if raw_intrinsics:
+        orig_w = raw_intrinsics.get("width", 1920)
+        orig_h = raw_intrinsics.get("height", 1200)
+        sx = IMAGE_SIZE[0] / orig_w
+        sy = IMAGE_SIZE[1] / orig_h
+        camera_intrinsics = {
+            "fx": raw_intrinsics["fx"] * sx,
+            "fy": raw_intrinsics["fy"] * sy,
+            "cx": raw_intrinsics["cx"] * sx,
+            "cy": raw_intrinsics["cy"] * sy,
+            "width": IMAGE_SIZE[0],
+            "height": IMAGE_SIZE[1],
+        }
+
+    # ------------------------------------------------------------------
+    # Probe video frame count
+    # ------------------------------------------------------------------
+    video_frame_count = _get_video_frame_count(video_path)
+    print(f"[{task_id}] Video: {video_frame_count} frames  SFS: {n_frames} frames")
+    if video_frame_count != n_frames:
+        print(f"[{task_id}] WARNING: video/SFS frame count mismatch")
+
+    # ------------------------------------------------------------------
+    # Build per-frame validity mask and find contiguous runs
+    # ------------------------------------------------------------------
+    validity = _build_validity_mask(frames, video_frame_count)
+    runs = _contiguous_runs(validity, min_length=MIN_EPISODE_FRAMES)
+    if not runs:
+        raise ValueError(f"Task {task_id} has no valid contiguous runs after filtering")
+
+    print(f"[{task_id}] {len(runs)} contiguous run(s), "
+          f"total valid frames: {sum(len(r) for r in runs)}")
 
     # ------------------------------------------------------------------
     # Precompute all per-frame data into dense arrays (no video needed)
@@ -238,53 +397,15 @@ def convert_task_to_zarr(
     head_pose_world = batch_pose6_to_pose7(head_pose_6)
 
     # ------------------------------------------------------------------
-    # Filter valid frame indices
-    # ------------------------------------------------------------------
-    valid_indices: list[int] = []
-    for t in range(valid_frame_count):
-        if (
-            frames[t].collector_issue is not None
-            and frames[t].collector_issue.get("issue_type") == "Inactive Time"
-        ):
-            continue
-        window = slice(t, t + ACTION_WINDOW)
-        n_invalid = (
-            np.sum(np.any(left_world[window] >= INVALID_VALUE - 1, axis=1))
-            + np.sum(np.any(right_world[window] >= INVALID_VALUE - 1, axis=1))
-        )
-        if n_invalid > ACTION_WINDOW:
-            continue
-        valid_indices.append(t)
-
-    if not valid_indices:
-        raise ValueError(f"Task {task_id} has no valid frames after filtering")
-
-    print(f"[{task_id}] {len(valid_indices)} valid frames out of {valid_frame_count}")
-
-    # ------------------------------------------------------------------
-    # Probe video frame count
-    # ------------------------------------------------------------------
-    video_frame_count = _get_video_frame_count(video_path)
-    print(f"[{task_id}] Video: {video_frame_count} frames  SFS: {n_frames} frames")
-    if video_frame_count != n_frames:
-        print(f"[{task_id}] WARNING: video/SFS frame count mismatch")
-
-    # ------------------------------------------------------------------
-    # Plan sub-episodes (index lists only, no video decode yet)
+    # Split contiguous runs into sub-episodes and write
     # ------------------------------------------------------------------
     sub_episode_plans: list[list[int]] = []
-    for ep_start in range(0, len(valid_indices), SUB_EPISODE_LENGTH):
-        sub = valid_indices[ep_start : ep_start + SUB_EPISODE_LENGTH]
-        if len(sub) < 10:
-            continue
-        preliminary_kept = [t for t in sub if t < video_frame_count]
-        if len(preliminary_kept) < 10:
-            continue
-        sub_episode_plans.append(sub)
+    for run in runs:
+        for ep_start in range(0, len(run), SUB_EPISODE_LENGTH):
+            sub = run[ep_start : ep_start + SUB_EPISODE_LENGTH]
+            if len(sub) >= MIN_EPISODE_FRAMES:
+                sub_episode_plans.append(sub)
 
-    # ------------------------------------------------------------------
-    # Write sub-episodes (streaming: decode per sub-episode to bound memory)
-    # ------------------------------------------------------------------
     folder = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S-%f")
     task_output_dir = Path(output_dir) / folder
     task_output_dir.mkdir(parents=True, exist_ok=True)
@@ -292,17 +413,17 @@ def convert_task_to_zarr(
     written = 0
 
     for sub in sub_episode_plans:
-        sub_indices = sorted(t for t in sub if t < video_frame_count)
-        decoded = _decode_selected_frames(video_path, sub_indices)
+        decoded = _decode_selected_frames(video_path, sub)
         kept = [t for t in sub if t in decoded]
-        none_count = len(sub) - len(kept)
-        print(f"[ep{written}] sub={len(sub)}  kept={len(kept)}  dropped(no image)={none_count}  frames=[{sub[0]}..{sub[-1]}]")
-        if len(kept) < 10:
+        if len(kept) < MIN_EPISODE_FRAMES:
             del decoded
             continue
 
         T = len(kept)
         kept_arr = np.array(kept)
+
+        # All kept frames should have valid hand tracking;
+        # replace any remaining per-keypoint INVALID_VALUE sentinels with 0.0
         left_curr_7 = np.where(
             left_world[kept_arr] >= INVALID_VALUE - 1, 0.0, left_world[kept_arr]
         ).astype(np.float32)
@@ -315,7 +436,6 @@ def convert_task_to_zarr(
         right_wrist_curr_7 = np.where(
             right_wrist[kept_arr] >= INVALID_VALUE - 1, 0.0, right_wrist[kept_arr]
         ).astype(np.float32)
-
         actions_head = head_pose_world[kept_arr]
         left_keypoints = np.where(
             left_kps[kept_arr] >= INVALID_VALUE - 1, 0.0, left_kps[kept_arr]
@@ -326,6 +446,11 @@ def convert_task_to_zarr(
 
         ordered_frames = [decoded[t] for t in kept]
         del decoded
+
+        # Preview MP4 (before JPEG encoding to avoid re-decoding)
+        preview_path = task_output_dir / f"{task_id}_episode_{written:06d}.mp4"
+        _save_preview_mp4(ordered_frames, preview_path, fps=fps)
+
         n_workers = min(img_workers, T)
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             encode_results = list(pool.map(_resize_and_encode, ordered_frames))
@@ -333,8 +458,6 @@ def convert_task_to_zarr(
         image_shape = list(encode_results[0][0])
         pre_encoded = np.array([r[1] for r in encode_results], dtype=object)
         del encode_results
-
-        print(f"[ep{written}] T={T}  image_shape={image_shape}  kept={len(kept_arr)}")
 
         numeric_data = {
             "left.obs_ee_pose": left_curr_7,
@@ -350,6 +473,9 @@ def convert_task_to_zarr(
         lang_ann = _build_language_annotations(used_frames)
 
         episode_path = task_output_dir / f"{task_id}_episode_{written:06d}.zarr"
+        meta_override = {}
+        if camera_intrinsics:
+            meta_override["camera_intrinsics"] = camera_intrinsics
         ZarrWriter.create_and_write(
             episode_path=episode_path,
             numeric_data=numeric_data,
@@ -361,6 +487,7 @@ def convert_task_to_zarr(
             task=task_desc,
             annotations=lang_ann if lang_ann else None,
             enable_sharding=True,
+            metadata_override=meta_override or None,
         )
         written += 1
         print(f"[{task_id}] Wrote episode {written} ({T} frames) -> {episode_path.name}")

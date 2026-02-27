@@ -79,6 +79,7 @@ class FrameData:
     text_annotations: list[dict[str, Any]] = field(default_factory=list)
     subgoal: dict[str, Any] | None = None
     collector_issue: dict[str, Any] | None = None
+    hand_tracking_error: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,7 @@ class SFSDataExtractor:
         self.text_annotations: list[dict] = []
         self.subgoal_annotations: list[dict] = []
         self.collector_issues: list[dict] = []
+        self.hand_tracking_errors: list[dict] = []
         self.demonstration_metadata: dict[str, Any] = {}
 
         for attr in self.annotation_data.get("attributes", []):
@@ -166,6 +168,13 @@ class SFSDataExtractor:
                     self.collector_issues.append(
                         {"start_ts": start_ts, "end_ts": end_ts,
                          "issue_type": attr_dict.get("Collector Quality Issue", "")}
+                    )
+                elif label == "Hand Tracking Error":
+                    error_type = attr_dict.get("Hand Tracking Error", text)
+                    hand = attr_dict.get("Hand", "Both")
+                    self.hand_tracking_errors.append(
+                        {"start_ts": start_ts, "end_ts": end_ts,
+                         "error_type": error_type, "hand": hand}
                     )
                 self.text_annotations.append(
                     {"label": label, "text": text, "start_ts": start_ts,
@@ -201,6 +210,12 @@ class SFSDataExtractor:
                 return item
         return None
 
+    def get_hand_tracking_error_at_timestamp(self, timestamp: int) -> dict[str, Any] | None:
+        for item in self.hand_tracking_errors:
+            if item["start_ts"] <= timestamp <= item["end_ts"]:
+                return item
+        return None
+
     def get_text_annotations_at_timestamp(self, timestamp: int) -> list[dict[str, Any]]:
         return [
             ann for ann in self.text_annotations
@@ -220,6 +235,7 @@ class SFSDataExtractor:
                     text_annotations=self.get_text_annotations_at_timestamp(ts),
                     subgoal=self.get_subgoal_at_timestamp(ts),
                     collector_issue=self.get_collector_issue_at_timestamp(ts),
+                    hand_tracking_error=self.get_hand_tracking_error_at_timestamp(ts),
                 )
             )
         return frames
