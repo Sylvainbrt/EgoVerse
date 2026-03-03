@@ -368,9 +368,7 @@ class ZarrWriter:
             all_lengths.append(len(enc_arr))
 
         if len(set(all_lengths)) > 1:
-            raise ValueError(
-                f"Inconsistent frame counts across arrays: {all_lengths}"
-            )
+            raise ValueError(f"Inconsistent frame counts across arrays: {all_lengths}")
 
         self.total_frames = all_lengths[0]
 
