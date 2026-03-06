@@ -10,6 +10,7 @@ from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
 from omegaconf import DictConfig, OmegaConf
+from tabulate import tabulate
 
 from egomimic.rldb.zarr.utils import DataSchematic, set_global_seed
 from egomimic.scripts.evaluation.eval import Eval
@@ -21,6 +22,29 @@ from egomimic.utils.utils import extras, task_wrapper
 
 OmegaConf.register_new_resolver("eval", eval)
 log = RankedLogger(__name__, rank_zero_only=True)
+
+
+def _log_dataset_frame_counts(train_datasets: dict, valid_datasets: dict) -> None:
+    rows = []
+    for name, ds in train_datasets.items():
+        rows.append(("train", name, len(ds)))
+    if train_datasets:
+        rows.append(
+            ("TOTAL", "(train)", sum(len(ds) for ds in train_datasets.values()))
+        )
+    for name, ds in valid_datasets.items():
+        rows.append(("valid", name, len(ds)))
+    if valid_datasets:
+        rows.append(
+            ("TOTAL", "(valid)", sum(len(ds) for ds in valid_datasets.values()))
+        )
+    table = tabulate(
+        rows,
+        headers=["Split", "Dataset", "Frames"],
+        tablefmt="rounded_outline",
+        intfmt=",",
+    )
+    log.info("Dataset frame counts:\n" + table)
 
 
 @task_wrapper
@@ -101,6 +125,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     model: LightningModule = hydra.utils.instantiate(
         cfg.model, robomimic_model={"data_schematic": data_schematic}
     )
+
+    _log_dataset_frame_counts(train_datasets, valid_datasets)
 
     log.info("Instantiating callbacks...")
     callbacks: List[Callback] = instantiate_callbacks(cfg.get("callbacks"))
