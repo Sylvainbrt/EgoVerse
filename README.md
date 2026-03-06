@@ -1,13 +1,13 @@
 # EgoVerse: Egocentric Data for Robot Learning from Around the World
 ![EgoVerse](./assets/egoverse.png)
-This repository contains the data processing and training code for EgoVerse and a refactored pipeline for training multi-embodiment BC policies and rolling them out.
+This repository contains the data processing, training and evaluation code for EgoVerse.
 
 ---
 
 ## Structure
-- [``egomimic/trainHydra.py``](./egomimic/trainHydra.py): Main training script, powered by Pytorch Lightning and Hydra (DDP enabled)
+- [``egomimic/trainHydra.py``](./egomimic/trainHydra.py): Main training script, powered by Pytorch Lightning and Hydra (DDP supported)
 - [``egomimic/hydra_configs``](./egomimic/hydra_configs): Train configs for each algorithm
-- [``egomimic/algo``](./egomimic/algo): Algorithm code for EgoMimic, ACT and HPT
+- [``egomimic/algo``](./egomimic/algo): Algorithm code: ACT, EgoMimic (HPT based), Pi
 - [``egomimic/scripts/aloha_process``](./egomimic/scripts/aloha_process/): Process raw aloha hdf5 to zarr/lerobot
 - [``egomimic/scripts/aria_process``](./egomimic/scripts/aria_process/): Process aria vrs to zarr/lerobot
 
@@ -71,12 +71,25 @@ class asyncLauncher:
         self.return_value = 0
 ```
 
-I wanted to package this change nicely, but the hydra package is built very weirdly.  I tried to pip install -e . locally but the plugins package doesn't install correctly.  I'll try to PR this change into the main repo
-
+I wanted to package this change nicely, but the hydra package is built very weirdly.
 
 ## Quick Start Guide
+### Data Visualization
+Visit https://partners.mecka.ai/egoverse to view our entire dataset in the web!
+
+To visualize data programatically see [``zarr_data_viz.ipynb``](./egomimic/scripts/tutorials/zarr_data_viz.ipynb)
+
+To programatically view the SQL table of all episodes + metadata see [``sql_tutorial.ipynb``](./egomimic/utils/aws/sql_tutorial.ipynb)
+
+### Data Downloading
+While our training pipeline automatically downloads data, you can manually download data via [``sync_s3.py``](./egomimic/scripts/data_download/sync_s3.py)
+
+### Training
 Basic training run (robot BC)...
 ``` bash
 python trainHydra.py --config_name=train_zarr
 ```
-For instructions on training see [``training.md``](./training.md)
+For full instructions on training see [``training.md``](./training.md)
+
+### Converting your own data
+See [``embodiment_tutorial.ipynb``](./egomimic/scripts/tutorials/embodiment_tutorial.ipynb) as reference to write a conversion script for your own data.

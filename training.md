@@ -1,4 +1,4 @@
-
+# Quick Start
 Behavior cloning and flow-matching based policy training for EgoVerse
 datasets.
 
@@ -8,11 +8,7 @@ All commands below assume you are inside the `egomimic/` subfolder.
 cd egomimic
 ```
 
-------------------------------------------------------------------------
-
-# Quick Start
-
-Launch interactive training with default configs:
+Launch interactive training with default configs on an example episode of RL2 lab robot data.
 
 ``` bash
 python trainHydra.py --config_name=train_zarr
@@ -20,13 +16,11 @@ python trainHydra.py --config_name=train_zarr
 
 This will:
 
-1.  Resolve dataset units from S3\
-2.  Download them locally (if not already present)\
-3.  Build the Zarr dataset\
-4.  Compute normalization statistics on the fly\
+1.  Filter episodes from SQL
+2.  Download those episodes locally from cloudflare R2 (if not already present)
+3.  Build the Zarr dataset
+4.  Compute normalization statistics on the fly
 5.  Start training using default configs
-
-By default, this uses our lab robot dataset.
 
 ------------------------------------------------------------------------
 
