@@ -1,4 +1,4 @@
-name: emimic
+name: egoverse
 channels:
   - conda-forge
   - defaults
