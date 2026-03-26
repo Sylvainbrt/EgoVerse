@@ -1,0 +1,59 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  dataset1:
+    _target_: egomimic.rldb.utils.FolderRLDBDataset
+    folder_path: /data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data
+    embodiment: viperx_right_arm
+    mode: train
+    resolver:
+      key_map:
+        front_img_1:
+          key_type: camera_keys
+          lerobot_key: observation.images.front_img_1
+        right_wrist_img:
+          key_type: camera_keys
+          lerobot_key: observation.images.right_wrist_img
+        joint_positions:
+          key_type: proprio_keys
+          lerobot_key: observation.state
+        actions_joints:
+          key_type: action_keys
+          lerobot_key: actions.joints_act
+        embodiment:
+          key_type: metadata_keys
+          lerobot_key: metadata.embodiment
+
+valid_datasets:
+  dataset1:
+    _target_: egomimic.rldb.utils.FolderRLDBDataset
+    folder_path: /data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data
+    embodiment: viperx_right_arm
+    mode: valid
+    resolver:
+      key_map:
+        front_img_1:
+          key_type: camera_keys
+          lerobot_key: observation.images.front_img_1
+        right_wrist_img:
+          key_type: camera_keys
+          lerobot_key: observation.images.right_wrist_img
+        joint_positions:
+          key_type: proprio_keys
+          lerobot_key: observation.state
+        actions_joints:
+          key_type: action_keys
+          lerobot_key: actions.joints_act
+        embodiment:
+          key_type: metadata_keys
+          lerobot_key: metadata.embodiment
+
+train_dataloader_params:
+  dataset1:
+    batch_size: 8
+    num_workers: 4
+
+valid_dataloader_params:
+  dataset1:
+    batch_size: 8
+    num_workers: 4

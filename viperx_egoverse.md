@@ -139,12 +139,19 @@ valid_datasets:
 ### Prerequisites
 ```bash 
 # 0. Create environment and setup 
-git clone --recursive git@github.com:GaTech-RL2/EgoVerse.git
+git clone --recursive git@github.com:Sylvainbrt/EgoVerse.git
 cd EgoVerse
 conda env create -f environment.yaml
-conda activate emimic
+conda activate egoverse
 pip install -e .
 pre-commit install
+
+# install lerobot
+git clone git@github.com:Anon-adam/lerobot.git --branch egomimic
+cd lerobot
+pip install -e .
+# Downgrade torchcodec for compatibility with torch 2.6.0
+pip install torchcodec==0.2.1
 ```
 
 ```bash
@@ -184,6 +191,41 @@ cd /data/sybeuret/codes/EgoVerse
 python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
   --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
-  --repo-id     lerobot/pick_sponge_egoverse
+  --repo-id     lerobot/pick_and_place_egoverse
 
+```
+
+### Verify converted dataset
+
+```bash
+python3 -c "
+import pandas as pd
+from pathlib import Path
+import json
+
+root = Path('/data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse')
+
+# Check parquet columns and shapes
+p = sorted(root.rglob('*.parquet'))[0]
+df = pd.read_parquet(p)
+print('Columns:', df.columns.tolist())
+print('actions.joints_act shape:', df['actions.joints_act'][0].shape)  # expect (100, 7)
+print('observation.state shape:',  df['observation.state'][0].shape)   # expect (7,)
+print('metadata.embodiment:',      df['metadata.embodiment'][0])       # expect [15]
+
+# Check info.json
+info = json.loads((root / 'meta/info.json').read_text())
+print('robot_type:', info['robot_type'])   # expect viperx_right_arm
+print('features:', list(info['features'].keys()))
+"
+```
+
+### Training Run
+
+```bash
+python trainHydra.py \
+  --config-name=train \
+  lerobot_data=viperx_local \
+  logger=debug \
+  trainer=debug
 ```

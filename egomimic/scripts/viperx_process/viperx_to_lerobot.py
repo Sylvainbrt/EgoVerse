@@ -10,9 +10,9 @@ Updates info.json robot_type to "viperx_right_arm".
 
 Usage:
     python viperx_to_lerobot.py \
-        --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_sponge \
-        --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_sponge_egov \
-        --repo-id     lerobot/pick_sponge_egov
+        --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
+        --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
+        --repo-id     lerobot/pick_and_place_egoverse
 """
 
 import argparse
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from egomimic.rldb.embodiment.embodiment import EMBODIMENT
 
@@ -70,7 +70,6 @@ def convert(input_path: Path, output_path: Path, repo_id: str):
     src = LeRobotDataset(
         repo_id=repo_id,
         root=input_path,
-        local_files_only=True,
     )
 
     # ── 2. Build new feature dict ─────────────────────────────────────────────
@@ -79,8 +78,11 @@ def convert(input_path: Path, output_path: Path, repo_id: str):
     new_features = {}
     # Keep all existing non-action features unchanged
     for k, v in src_features.items():
-        if k != "action":
-            new_features[k] = v
+        if k == "action":
+            continue
+        if isinstance(v, dict) and v.get("dtype") == "video":
+            continue
+        new_features[k] = v
 
     # observation.state: strip to 7-DoF
     new_features["observation.state"] = {
@@ -134,74 +136,61 @@ def convert(input_path: Path, output_path: Path, repo_id: str):
         logger.info(f"  Episode {ep_idx}/{num_episodes - 1}")
 
         # Get all frame indices for this episode
-        ep_mask = src.hf_dataset["episode_index"] == ep_idx
-        frame_indices = [i for i, m in enumerate(ep_mask) if m]
+        ep_data = src.hf_dataset.filter(lambda x: x["episode_index"] == ep_idx)
+        frame_indices = ep_data["index"]  # global frame indices
 
         # Load raw arrays for this episode
-        actions_9dof = np.array(
-            [src.hf_dataset[i]["action"] for i in frame_indices]
-        )  # (T, 9)
-        state_9dof = np.array(
-            [src.hf_dataset[i]["observation.state"] for i in frame_indices]
-        )  # (T, 9)
+        actions_9dof = np.array(ep_data["action"])  # (T, 9)
+        state_9dof = np.array(ep_data["observation.state"])  # (T, 9)
 
         # Process
         state_7dof, joints_act_chunk = process_episode(actions_9dof)
         state_7dof_obs = state_9dof[:, VIPERX_KEEP_INDICES]  # (T, 7)
 
         # T = len(frame_indices)
+        task_idx = int(ep_data["task_index"][0])
+        # tasks DataFrame is indexed by task string, task_index is a column
+        task_str = src.meta.tasks[src.meta.tasks["task_index"] == task_idx].index[0]
 
-        for local_t, global_idx in enumerate(frame_indices):
-            raw_frame = src[global_idx]
-
+        for local_t in range(len(frame_indices)):
             frame = {}
-
-            # Pass through all video/image keys
-            for k, v in raw_frame.items():
-                if k in (
-                    "action",
-                    "observation.state",
-                    "timestamp",
-                    "frame_index",
-                    "episode_index",
-                    "index",
-                    "task_index",
-                ):
-                    continue
-                frame[k] = v
-
-            # Overwrite state with 7-DoF
+            frame["task"] = task_str
             frame["observation.state"] = torch.from_numpy(state_7dof_obs[local_t])
-
-            # Add pre-chunked actions
             frame["actions.joints_act"] = torch.from_numpy(
-                joints_act_chunk[local_t]
-            )  # (100, 7)
-
-            # Add embodiment metadata
+                joints_act_chunk[local_t].astype(np.float32)
+            )
             frame["metadata.embodiment"] = torch.tensor(
                 [embodiment_id], dtype=torch.int32
             )
-
             dst.add_frame(frame)
 
-        # Get task string for this episode
-        task_idx = int(src.hf_dataset[frame_indices[0]]["task_index"])
-        task_str = src.meta.tasks[task_idx]
-        dst.save_episode(task=task_str)
+        dst.save_episode()
 
-    dst.consolidate()
-    logger.info("Done. Consolidation complete.")
+    dst.finalize()
+    logger.info("Done. Finalization complete.")
 
-    # ── 5. Verify output info.json ────────────────────────────────────────────
+    # ── 5. Copy video files directly ─────────────────────────────────────────
+    logger.info("Copying video files...")
+    src_videos = input_path / "videos"
+    dst_videos = output_path / "videos"
+    if src_videos.exists():
+        if dst_videos.exists():
+            shutil.rmtree(dst_videos)
+        shutil.copytree(src_videos, dst_videos)
+        logger.info(f"Copied videos from {src_videos} to {dst_videos}")
+
+    # ── 6. Patch info.json to add video features back ─────────────────────────
+    logger.info("Patching info.json with video features...")
     info_path = output_path / "meta" / "info.json"
     with open(info_path) as f:
         info = json.load(f)
-    assert (
-        info["robot_type"] == "viperx_right_arm"
-    ), f"robot_type mismatch: {info['robot_type']}"
-    logger.info(f"Output info.json robot_type: {info['robot_type']} ✓")
-    logger.info(f"Output features: {list(info['features'].keys())}")
+    for k, v in src_features.items():
+        if isinstance(v, dict) and v.get("dtype") == "video":
+            info["features"][k] = v
+    with open(info_path, "w") as f:
+        json.dump(info, f, indent=4)
+    logger.info(f"robot_type: {info['robot_type']} ✓")
+    logger.info(f"features: {list(info['features'].keys())}")
 
 
 def main():

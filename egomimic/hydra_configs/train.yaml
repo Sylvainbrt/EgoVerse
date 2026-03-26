@@ -4,10 +4,13 @@ defaults:
   - trainer: ddp
   - debug: null
   - logger: wandb
-  - data: eva_bc_s3
+  - data: viperx_local
   - callbacks: checkpoints
   - override hydra/launcher: submitit
   - _self_
+
+seed : 42
+norm_stat_fraction: 1.0 
 
 name: test
 description: test
@@ -26,7 +29,7 @@ hydra:
     # Dir should be experiment_name/description_{timestamp}
     dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
   sweep:
-    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S}
+    dir: ./logs/${name}/${description}_${now:%Y-%m-%d_%H-%M-%S} 
 
 launch_params:
   gpus_per_node: 1

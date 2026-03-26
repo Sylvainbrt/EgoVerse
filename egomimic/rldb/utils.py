@@ -5,7 +5,6 @@ import random
 import subprocess
 import tempfile
 import traceback
-from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -18,7 +17,7 @@ import torch.nn.functional as F
 from datasets import concatenate_datasets
 from datasets import config as ds_cfg
 from datasets.utils.logging import disable_progress_bar
-from lerobot.common.datasets.lerobot_dataset import (
+from lerobot.datasets.lerobot_dataset import (
     LeRobotDataset,
     LeRobotDatasetMetadata,
 )
@@ -115,6 +114,16 @@ def nds(nested_ds, tab_level=0):
         nds(nested_ds[0], tab_level + 1)
 
 
+def _parse_split(split_val, total_episodes):
+    """Parse HuggingFace range string '0:14' or list [0,1,2,...] into a list of indices."""
+    if isinstance(split_val, list):
+        return split_val
+    if isinstance(split_val, str) and ":" in split_val:
+        start, end = split_val.split(":")
+        return list(range(int(start), int(end)))
+    return list(range(total_episodes))
+
+
 class RLDBDataset(LeRobotDataset):
     def __init__(
         self,
@@ -125,139 +134,73 @@ class RLDBDataset(LeRobotDataset):
         percent=0.1,
         mode="train",
         valid_ratio: float = 0.2,
+        use_task_string: bool = False,
+        slow_down_ac_keys=None,
+        slow_down_factor: float = 1.0,
+        task_string: str = "",
+        annotation_df=None,
         **kwargs,
     ):
-        dataset_meta = LeRobotDatasetMetadata(
-            repo_id=repo_id, root=root, local_files_only=local_files_only
-        )
-        dataset_meta._update_splits(valid_ratio=valid_ratio)
+        dataset_meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
 
-        dataset_splits = dataset_meta.info["splits"]
-        train_indices = dataset_splits["train"]
+        total_episodes = dataset_meta.total_episodes
+
+        # Parse and normalize splits
+        raw_splits = dataset_meta.info.get("splits", {})
+        train_raw = raw_splits.get("train", f"0:{total_episodes}")
+        all_train = _parse_split(train_raw, total_episodes)
+
+        if "valid" not in raw_splits:
+            n_valid = max(1, int(total_episodes * valid_ratio))
+            rng = random.Random(SEED)
+            shuffled = all_train.copy()
+            rng.shuffle(shuffled)
+            valid_indices = sorted(shuffled[:n_valid])
+            train_indices = sorted(shuffled[n_valid:])
+        else:
+            valid_indices = _parse_split(raw_splits["valid"], total_episodes)
+            train_indices = all_train
 
         self.embodiment = get_embodiment_id(dataset_meta.robot_type)
         self.sampled_indices = None
-
-        self.use_task_string = kwargs.get("use_task_string", False)
-        if self.use_task_string:
-            self.task_string = kwargs.get("task_string", "")
-
-        self.slow_down_factor = float(kwargs.get("slow_down_factor", 1.0))
-        raw_keys = kwargs.get("slow_down_ac_keys", None)
-        raw_rot_specs = kwargs.get("slow_down_rot_specs", None)
-
-        if raw_rot_specs is None:
-            self.slow_down_rot_specs = {}
-        else:
-            self.slow_down_rot_specs = dict(raw_rot_specs)
-
-        for k, v in self.slow_down_rot_specs.items():
-            # v should be a 2-tuple-like: (rot_type, index_ranges)
-            if not (
-                isinstance(v, Sequence)
-                and not isinstance(v, (str, bytes))
-                and len(v) == 2
-            ):
-                raise ValueError(
-                    f"slow_down_rot_specs['{k}'] must be (rot_type, index_ranges), got {type(v)} with value {v}"
-                )
-
-            rot_type, ranges = v
-
-            if rot_type not in ("quat_wxyz", "ypr"):
-                raise ValueError(
-                    f"Rotation type for key '{k}' must be 'quat_wxyz' or 'ypr', got {rot_type}"
-                )
-
-            if not (
-                isinstance(ranges, Sequence) and not isinstance(ranges, (str, bytes))
-            ):
-                raise ValueError(
-                    f"Index ranges for slow_down_rot_specs['{k}'] must be a sequence of (start, end) pairs, got {type(ranges)}"
-                )
-
-            for pair in ranges:
-                if not (
-                    isinstance(pair, Sequence)
-                    and not isinstance(pair, (str, bytes))
-                    and len(pair) == 2
-                ):
-                    raise ValueError(
-                        f"Each index range for slow_down_rot_specs['{k}'] must be a (start, end) sequence, got {pair}"
-                    )
-
-        if raw_keys is None:
-            self.slow_down_ac_keys = []
-        elif isinstance(raw_keys, str):
-            # single key as string
-            self.slow_down_ac_keys = [raw_keys]
-        elif isinstance(raw_keys, Sequence) and not isinstance(raw_keys, (str, bytes)):
-            # list, tuple, Hydra ListConfig, etc.
-            self.slow_down_ac_keys = list(raw_keys)
-        else:
-            raise ValueError(
-                f"slow_down_ac_keys must be str, sequence, or None; got {type(raw_keys)}"
-            )
-
-        annotation_path = Path(root) / "annotations"
-        if annotation_path.is_dir():
-            self.annotations = AnnotationLoader(root=root)
-            self.annotation_df = self.annotations.df
-        else:
-            self.annotations = None
-            self.annotation_df = None
+        self.use_task_string = use_task_string
+        self.slow_down_ac_keys = slow_down_ac_keys  # <-- add
+        self.slow_down_factor = slow_down_factor  # <-- add
+        self.task_string = task_string  # <-- add
+        self.annotation_df = annotation_df  # <-- add
 
         if mode == "train":
             super().__init__(
                 repo_id=repo_id,
                 root=root,
-                local_files_only=local_files_only,
                 episodes=train_indices,
             )
-
         elif mode == "valid":
-            assert "valid" in dataset_splits, (
-                "Validation split not found in dataset_splits. "
-                f"Please include a 'valid' key by updating your dataset metadata in {dataset_meta.root}.info.json ."
-            )
-            valid_indices = dataset_splits["valid"]
             super().__init__(
                 repo_id=repo_id,
                 root=root,
-                local_files_only=local_files_only,
                 episodes=valid_indices,
             )
-
         elif mode == "sample" and episodes is not None:
             super().__init__(
                 repo_id=repo_id,
                 root=root,
-                local_files_only=local_files_only,
                 episodes=episodes,
             )
-
         elif mode == "percent" and percent is not None:
-            assert 0 < percent <= 1, "Percent should be a value between 0 and 1."
-
-            # Load full dataset first
+            assert 0 < percent <= 1
             super().__init__(
                 repo_id=repo_id,
                 root=root,
-                local_files_only=local_files_only,
                 episodes=train_indices,
             )
-
-            # Sample a percentage of frames
             total_frames = len(self)
             num_sampled_frames = int(percent * total_frames)
             self.sampled_indices = sorted(
                 random.sample(range(total_frames), num_sampled_frames)
             )
-
         else:
-            super().__init__(
-                repo_id=repo_id, root=root, local_files_only=local_files_only
-            )
+            super().__init__(repo_id=repo_id, root=root)
 
     def __len__(self):
         """Return the total number of sampled frames if in 'percent' mode, otherwise the full dataset size."""
@@ -1222,7 +1165,13 @@ class DataSchematic(object):
 
         logger.info("[NormStats] Finished norm inference")
 
-    def infer_norm_from_dataset(self, dataset):
+    def infer_norm_from_dataset(
+        self,
+        dataset,
+        dataset_name,
+        sample_frac: float = 1.0,
+        benchmark_dir: str | None = None,
+    ):
         """
         dataset: huggingface dataset or zarr dataset
         returns: dictionary of means and stds for proprio and action keys
