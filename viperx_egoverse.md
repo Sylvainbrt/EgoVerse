@@ -3,138 +3,55 @@
 ## Overview
 
 Adapting a ViperX robot arm setup (recorded via LeRobot) to train with
-EgoVerse.\
+EgoVerse.  
 EgoVerse supports two training pipelines; we use the **LeRobot
 pipeline** (not Zarr).
 
-------------------------------------------------------------------------
+---
 
 ## Pipeline
 
     ViperX LeRobot dataset
         ↓ (viperx_to_lerobot.py)
-    EgoVerse training (parquet + mp4, 9 DoF)
+    EgoVerse training (parquet + mp4, 9 DoF -> 7 DoF)
         ↓ (convert + add columns)
     FolderRLDBDataset
 
-------------------------------------------------------------------------
+---
 
-## Current Dataset State
+## Dataset State
 
-Recorded dataset at:
+Original recorded dataset at:
 
     /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_sponge
 
-  ----------------------------------------------------------------------------
-  Property              Value
-  --------------------- ------------------------------------------------------
-  `robot_type`          "viperx"
+| Property            | Original Value                     | Converted Value (EgoVerse)       |
+| ------------------- | ---------------------------------- | -------------------------------- |
+| `robot_type`        | "viperx"                           | "viperx_right_arm"               |
+| Action shape        | (T, 9) - 2 shadow joints           | (T, 100, 7) chunked 7-DoF        |
+| `observation.state` | (T, 9)                             | (T, 7)                           |
+| Images              | observation.images...              | observation.images...            |
+| Keys added          | -                                  | actions.joints_act, metadata...  |
 
-  `action` shape        (T, 9) --- includes 2 shadow joints at indices 2 and 4
+---
 
-  `observation.state`   (T, 9)
+## Completed Implementations
 
-  Images                observation.images.front_img_1,
-                        observation.images.right_wrist_img
+### 1. Embodiment Setup
+- **`egomimic/rldb/embodiment/embodiment.py`**: Added `VIPERX_RIGHT_ARM = 15` to the `EMBODIMENT` enum.
+- **`egomimic/rldb/embodiment/viperx.py`**: Created `ViperX` mapping class defining `get_keymap()` and image formats (`[B, C, H, W]`).
 
-  Missing               actions.joints_act, metadata.embodiment
-  ----------------------------------------------------------------------------
+### 2. Dataset Processing
+- **`egomimic/scripts/viperx_process/viperx_to_lerobot.py`**: Handles filtering out shadow joints (indices 2 and 4), converting from 9-DoF to 7-DoF, adding the embodiment enum to parquet, chunking actions (T=100), and rewriting metadata.
+- **`egomimic/scripts/viperx_process/fix_episodes_metadata.py`**: Repairs video metadata lost or mangled during Pandas/Parquet conversions.
 
-------------------------------------------------------------------------
+### 3. HPT Hydra Configs
+- **`hydra_configs/model/hpt_bc_flow_viperx.yaml`**: Defined encoder/stem structures matching 7-DoF inputs and empty `camera_transforms`.
+- **`hydra_configs/train.yaml`**: Updated `DataSchematic` and dataset paths to map LeRobot raw names to EgoVerse model names dynamically.
 
-## Required Modifications
+---
 
-### 1. Add ViperX to EMBODIMENT enum
-
-**File:** egomimic/rldb/embodiment/embodiment.py
-
-``` python
-class EMBODIMENT(Enum):
-    SCALE_RIGHT_ARM = 13
-    SCALE_LEFT_ARM = 14
-    VIPERX_RIGHT_ARM = 15
-```
-
-------------------------------------------------------------------------
-
-### 2. Create ViperX Embodiment class
-
-**File:** egomimic/rldb/embodiment/viperx.py
-
--   Implement get_keymap()
--   Implement get_transform_list()
--   Keep indices \[0, 1, 3, 5, 6, 7, 8\]
-
-------------------------------------------------------------------------
-
-### 3. Dataset Conversion Script
-
-**File:** egomimic/scripts/viperx_process/viperx_to_lerobot.py
-
-  -----------------------------------------------------------------------
-  Transform             Detail
-  --------------------- -------------------------------------------------
-  observation.state     (T, 9) → (T, 7)
-
-  actions.joints_act    (T, 9) → (T, 100, 7)
-
-  metadata.embodiment   constant value
-
-  info.json robot_type  viperx → viperx_right_arm
-  -----------------------------------------------------------------------
-
-    POINT_GAP = 2
-    CHUNK_LENGTH = 100
-
-Run:
-
-    python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
-      --input-path  /data/.../pick_sponge \
-      --output-path /data/.../pick_sponge_egov \
-      --repo-id     lerobot/pick_sponge_egov
-
-------------------------------------------------------------------------
-
-### 4. Hydra Config
-
-``` yaml
-_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
-
-train_datasets:
-  dataset1:
-    _target_: egomimic.rldb.utils.FolderRLDBDataset
-    folder_path: /data/.../pick_sponge_egov
-    embodiment: viperx_right_arm
-    mode: train
-
-valid_datasets:
-  dataset1:
-    _target_: egomimic.rldb.utils.FolderRLDBDataset
-    folder_path: /data/.../pick_sponge_egov
-    embodiment: viperx_right_arm
-    mode: valid
-```
-
-------------------------------------------------------------------------
-
-## TODO
-
--   [ ] Check configs
--   [ ] Check DataSchematic
--   [ ] Optional FK actions
--   [ ] Implement transforms
-
-------------------------------------------------------------------------
-
-## Files
-
--   embodiment.py
--   viperx.py
--   viperx_to_lerobot.py
--   viperx_local.yaml
-
-
-## Running
+## How to Run the Pipeline
 
 ### Prerequisites
 ```bash 
@@ -153,6 +70,8 @@ pip install -e .
 # Downgrade torchcodec for compatibility with torch 2.6.0
 pip install torchcodec==0.2.1
 ```
+
+### 1. Verification Scripts
 
 ```bash
 # 1. Activate environment
@@ -193,6 +112,9 @@ python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
   --repo-id     lerobot/pick_and_place_egoverse
 
+# Restore missing video columns 
+python egomimic/scripts/viperx_process/fix_episodes_metadata.py
+
 ```
 
 ### Verify converted dataset
@@ -223,9 +145,18 @@ print('features:', list(info['features'].keys()))
 ### Training Run
 
 ```bash
-python trainHydra.py \
+python egomimic/trainHydra.py \
   --config-name=train \
-  lerobot_data=viperx_local \
+  data=viperx_local \
+  model=hpt_bc_flow_viperx \
   logger=debug \
   trainer=debug
 ```
+
+### Next steps / Troubleshooting
+
+If you encounter errors during initialization, verify the following:
+
+Missing camera_transforms in YAML: Ensure camera_transforms: {} exists in hpt_bc_flow_viperx.yaml.
+keys_of_type Argument Error: The HPT.__init__ in egomimic/algo/hpt.py may be explicitly passing the embodiment_id flag. Verify that the line data_schematic.keys_of_type("action_keys") matches the signature in rldb/utils.py.
+"Data not found" during NormStats inference: If debug logs report Skipping observation.state, double check string names. Note the difference between observation.(...) (singular) and observations.(...) (plural) in your YAML files versus info.json.

@@ -96,10 +96,28 @@ data_schematic: # Dynamically fill in these shapes from the dataset
       embodiment:
         key_type: metadata_keys
         lerobot_key: metadata.embodiment
+    viperx_right_arm:
+      front_img_1:
+        key_type: camera_keys
+        lerobot_key: observation.images.front_img_1
+      right_wrist_img:
+        key_type: camera_keys
+        lerobot_key: observation.images.right_wrist_img
+      joint_positions:
+        key_type: proprio_keys
+        lerobot_key: observation.state
+      actions_joints:
+        key_type: action_keys
+        lerobot_key: actions.joints_act
+      embodiment:
+        key_type: metadata_keys
+        lerobot_key: metadata.embodiment
   viz_img_key: 
     eva_bimanual:
       front_img_1
     aria_bimanual:
       front_img_1
     mecka_bimanual:
+      front_img_1
+    viperx_right_arm:
       front_img_1
