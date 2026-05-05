@@ -13,11 +13,9 @@ class ViperX(Embodiment):
         Maps raw dataset keys (LeRobot) to EgoVerse internal processing keys.
         """
         return {
-            "observation.images.front_img_1": "front_img_1",
-            "observation.images.right_wrist_img": "right_wrist_img",
             "observation.state": "joint_positions",
             "actions.joints_act": "actions_joints",
-            "metadata.embodiment": "embodiment",
+            "observation.images.front_img_1": "front_img_1",
         }
 
     @classmethod

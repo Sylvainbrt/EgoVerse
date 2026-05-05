@@ -64,17 +64,24 @@ pip install -e .
 pre-commit install
 
 # install lerobot
+cd ..
 git clone git@github.com:Anon-adam/lerobot.git --branch egomimic
 cd lerobot
-pip install -e .
+pip install -e . --no-deps
 # Downgrade torchcodec for compatibility with torch 2.6.0
-pip install torchcodec==0.2.1
+# pip install torchcodec==0.2.1
+
+# other dependencies
+pip install awscli
+pip install accelerate
+
+cd ../EgoVerse
 ```
 
 ### 1. Verification Scripts
 
-```bash
 # 1. Activate environment
+```bash
 conda activate egoverse
 
 # 2. Verify your source dataset looks correct
@@ -88,18 +95,11 @@ print('Shape:',   df.shape)
 print('Action shape:', df['action'][0].shape)
 "
 
-# Expected: 
-# Columns: ['action', 'observation.state', 'timestamp', 'frame_index', 'episode_index', 'index', 'task_index']
-# Shape: (7470, 7)
-# Action shape: (9,)
-
-
-# Verify VIPERX_RIGHT_ARM is already in the enum (was added manually)
+# Verify VIPERX_RIGHT_ARM is already in the enum
 python3 -c "
 from egomimic.rldb.embodiment.embodiment import EMBODIMENT
 print(EMBODIMENT.VIPERX_RIGHT_ARM)
 "
-# Expected: EMBODIMENT.VIPERX_RIGHT_ARM
 ```
 
 ### Run conversion
@@ -114,49 +114,53 @@ python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
 
 # Restore missing video columns 
 python egomimic/scripts/viperx_process/fix_episodes_metadata.py
-
-```
-
-### Verify converted dataset
-
-```bash
-python3 -c "
-import pandas as pd
-from pathlib import Path
-import json
-
-root = Path('/data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse')
-
-# Check parquet columns and shapes
-p = sorted(root.rglob('*.parquet'))[0]
-df = pd.read_parquet(p)
-print('Columns:', df.columns.tolist())
-print('actions.joints_act shape:', df['actions.joints_act'][0].shape)  # expect (100, 7)
-print('observation.state shape:',  df['observation.state'][0].shape)   # expect (7,)
-print('metadata.embodiment:',      df['metadata.embodiment'][0])       # expect [15]
-
-# Check info.json
-info = json.loads((root / 'meta/info.json').read_text())
-print('robot_type:', info['robot_type'])   # expect viperx_right_arm
-print('features:', list(info['features'].keys()))
-"
 ```
 
 ### Training Run
+## Option A: Training from scratch on local data
 
 ```bash
 python egomimic/trainHydra.py \
   --config-name=train \
   data=viperx_local \
   model=hpt_bc_flow_viperx \
-  logger=debug \
-  trainer=debug
+  logger=wandb \
+  trainer=ddp
 ```
+
+## Option B: Fine-Tuning from Pretrained EgoVerse Model (Recommended)
+
+```bash
+python egomimic/trainHydra.py \
+  --config-name=train \
+  data=viperx_local \
+  model=hpt_bc_flow_viperx \
+  ckpt_path=/path/to/downloaded/egoverse_base.ckpt \
+  logger=wandb \
+  trainer=ddp
+```
+
+### Rollout / Inference
+
+Once your model has trained (check logs/checkpoints/ for .ckpt files), you can run inference directly on the ViperX using the wrapper built on LeRobot. Ensure the robot workspace is clear and Aria glasses are connected.
+
+```bash
+python egomimic/robot/viperx/viperx_rollout.py \
+  --policy-path /path/to/your/checkpoint/last.ckpt \
+  --frequency 30 \
+  --query_frequency 30
+```
+
+## Rollout Controls:
+
+- q : Quit safely and stop inference.
+- r : Restart rollout state (Clears action chunking buffers).
 
 ### Next steps / Troubleshooting
 
 If you encounter errors during initialization, verify the following:
 
-Missing camera_transforms in YAML: Ensure camera_transforms: {} exists in hpt_bc_flow_viperx.yaml.
-keys_of_type Argument Error: The HPT.__init__ in egomimic/algo/hpt.py may be explicitly passing the embodiment_id flag. Verify that the line data_schematic.keys_of_type("action_keys") matches the signature in rldb/utils.py.
-"Data not found" during NormStats inference: If debug logs report Skipping observation.state, double check string names. Note the difference between observation.(...) (singular) and observations.(...) (plural) in your YAML files versus info.json.
+- Missing camera_transforms in YAML: Ensure camera_transforms: {} exists in hpt_bc_flow_viperx.yaml.
+- keys_of_type Argument Error: The HPT.__init__ in egomimic/algo/hpt.py may be explicitly passing the embodiment_id flag. Verify that the line data_schematic.keys_of_type("action_keys") matches the signature in rldb/utils.py.
+- "Data not found" during NormStats inference: If debug logs report Skipping observation.state, double check string names. Note the difference between observation.(...) (singular) and observations.(...) (plural) in your YAML files versus info.json.
+- LeRobot Driver Issues during Rollout: If ViperXInterface fails to connect, ensure no other python scripts are grabbing the camera feed or serial ports simultaneously.

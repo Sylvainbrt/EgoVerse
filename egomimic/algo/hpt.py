@@ -359,8 +359,17 @@ class HPTModel(nn.Module):
         """
         feats = []
         feat_dict = {}
-        for modality in self.modalities.get(domain, []) + self.shared_keys:
+        expected_modalities = self.modalities.get(domain, []) + self.shared_keys
+
+        # --- DIAGNOSTIC: print key mismatch ---
+        print(f"[stem_process] domain='{domain}'")
+        print(f"  expected modalities : {expected_modalities}")
+        print(f"  data keys available : {list(data.keys())}")
+        # ---------------------------------------
+
+        for modality in expected_modalities:
             if modality not in data:
+                print(f"  WARNING: '{modality}' NOT FOUND, skipping")
                 continue
             if modality in self.shared_keys:
                 domain = "shared"
@@ -394,6 +403,14 @@ class HPTModel(nn.Module):
             stem_token = stem.compute_latent(data[modality])
             feats.append(stem_token)
             feat_dict[modality] = stem_token
+
+        if not feats:
+            raise RuntimeError(
+                f"[stem_process] No features produced for domain '{domain}'.\n"
+                f"  Stem expected : {expected_modalities}\n"
+                f"  Data had keys : {list(data.keys())}\n"
+                "  → Key names in your stem config must match keys built in _robomimic_to_hpt_data."
+            )
 
         return feats, feat_dict
 
@@ -915,19 +932,21 @@ class HPT(Algo):
             self.camera_keys[embodiment_id] = []
             self.proprio_keys[embodiment_id] = []
             self.lang_keys[embodiment_id] = []
-            for key in data_schematic.keys_of_type("action_keys", embodiment_id):
+
+            # Remove embodiment_id from the following four lines
+            for key in data_schematic.keys_of_type("action_keys"):
                 if (
                     data_schematic.is_key_with_embodiment(key, embodiment_id)
                     and key == self.ac_keys[embodiment]
                 ):
                     self.ac_keys[embodiment_id] = key
-            for key in data_schematic.keys_of_type("camera_keys", embodiment_id):
+            for key in data_schematic.keys_of_type("camera_keys"):
                 if data_schematic.is_key_with_embodiment(key, embodiment_id):
                     self.camera_keys[embodiment_id].append(key)
-            for key in data_schematic.keys_of_type("proprio_keys", embodiment_id):
+            for key in data_schematic.keys_of_type("proprio_keys"):
                 if data_schematic.is_key_with_embodiment(key, embodiment_id):
                     self.proprio_keys[embodiment_id].append(key)
-            for key in data_schematic.keys_of_type("lang_keys", embodiment_id):
+            for key in data_schematic.keys_of_type("lang_keys"):
                 if data_schematic.is_key_with_embodiment(key, embodiment_id):
                     self.lang_keys[embodiment_id].append(key)
 
@@ -940,32 +959,43 @@ class HPT(Algo):
 
     @override
     def process_batch_for_training(self, batch):
-        """
-        Processes input batch from a data loader to filter out
-        relevant information and prepare the batch for training.
-        Args:
-            batch (dict): dictionary with torch.Tensors sampled
-                from a data loader
-        Returns:
-            batch (dict): processed dict of batchs of form
-                front_img_1 torch.Size([32, 3, 480, 640])
-                right_wrist_img: torch.Size([32, 3, 480, 640])
-                joint_positions: torch.Size([32, 1, 7])
-                actions_joints_act: torch.Size([32, 100, 7])
-                demo_number: torch.Size([32])
-                _index: torch.Size([32])
-                pad_mask: torch.Size([32, 100, 1])
-                embodiment: torch.Size([])
-        """
         processed_batch = {}
         for embodiment_name, _batch in batch.items():
             embodiment_id = get_embodiment_id(embodiment_name)
             processed_batch[embodiment_id] = {}
-            for key, value in _batch.items():
-                key_name = self.data_schematic.zarr_key_to_keyname(key, embodiment_id)
-                if key is not None:
-                    processed_batch[embodiment_id][key_name] = value
 
+            # 1. Temporarily reverse-map keys back to info.json standard for Normalizer
+            temp_batch = {}
+            for k, v in _batch.items():
+                if k == "joint_positions":
+                    temp_batch["observation.state"] = v
+                elif k == "actions_joints":
+                    temp_batch["actions.joints_act"] = v
+                elif "img" in k or "cam" in k:
+                    # Re-namespace any image key back to observation.images.*
+                    temp_batch[f"observation.images.{k}"] = v
+                else:
+                    temp_batch[k] = v
+
+            # 2. Normalize safely
+            norm_batch = self.data_schematic.normalize_data(temp_batch, embodiment_id)
+            print(f"[DEBUG] temp_batch keys : {list(temp_batch.keys())}")
+            print(f"[DEBUG] norm_batch keys : {list(norm_batch.keys())}")
+
+            # 3. Forward-map back to HPT short names specifically required by Trunk
+            for k, v in norm_batch.items():
+                if k == "observation.state":
+                    processed_batch[embodiment_id]["joint_positions"] = v
+                elif k in ["actions.joints_act", "action"]:
+                    processed_batch[embodiment_id]["actions_joints"] = v
+                elif k.startswith("observation.images."):
+                    processed_batch[embodiment_id][
+                        k.replace("observation.images.", "")
+                    ] = v
+                else:
+                    processed_batch[embodiment_id][k] = v
+
+            # 4. Resume normal logic
             ac_key = self.ac_keys[embodiment_id]
             if len(processed_batch[embodiment_id][ac_key].shape) != 3:
                 raise ValueError("Action shape in batch is not 2")
@@ -976,9 +1006,6 @@ class HPT(Algo):
                 B, S, 1, device=device
             )
 
-            processed_batch[embodiment_id] = self.data_schematic.normalize_data(
-                processed_batch[embodiment_id], embodiment_id
-            )
             processed_batch[embodiment_id]["embodiment"] = torch.tensor(
                 [embodiment_id], device=self.device, dtype=torch.int64
             )
@@ -1410,19 +1437,19 @@ class HPT(Algo):
         """
         data = {}
 
-        for key in proprio_keys:
-            if key in batch:
-                data[f"state_{key}"] = batch[key].unsqueeze(1)
+        # Securely grab joint positions natively
+        if "joint_positions" in batch:
+            data["joint_positions"] = batch["joint_positions"].unsqueeze(1)
 
-        for key in cam_keys:
-            if key in batch:
+        # Securely grab ALL available cameras seamlessly (ignores cam_keys lists mismatch)
+        for key in list(batch.keys()):
+            if "img" in key or "cam" in key:
                 _data = batch[key]
                 if not torch.all(_data == 0):
                     if self.nets.training and key in self.encoders:
                         _data = self.train_image_augs(_data)
                     elif self.eval_image_augs and key in self.encoders:
                         _data = self.eval_image_augs(_data)
-
                 data[key] = _data.unsqueeze(1).unsqueeze(1)
 
         for key in lang_keys:
@@ -1434,12 +1461,21 @@ class HPT(Algo):
         data["embodiment"] = batch["embodiment"]
 
         for aux_ac_key in aux_ac_keys:
-            data[aux_ac_key] = batch[aux_ac_key]
+            if aux_ac_key in batch:
+                data[aux_ac_key] = batch[aux_ac_key]
 
         if self.shared_ac_key:
             data["action"] = batch[self.shared_ac_key]
         else:
-            data["action"] = batch[ac_key]
+            data["action"] = batch.get("actions_joints", batch.get(ac_key))
+
+        data["action"] = batch.get("actions_joints", batch.get(ac_key))
+        if (
+            data["action"] is not None
+            and data["action"].shape[1] > self.nets["policy"].action_horizon
+        ):
+            data["action"] = data["action"][:, : self.nets["policy"].action_horizon, :]
+
         return data
 
     def _clone_batch(self, batch):

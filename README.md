@@ -47,6 +47,10 @@ Download the AWS cli
  unzip awscliv2.zip
  ./aws/install -i ~/aws-cli -b ~/bin
 ```
+or with pip:
+```
+pip install awscli
+```
 
 Set up your AWS keys to access our cloud storage
 ```
@@ -56,6 +60,7 @@ SecretAccessKey: rGjT6NSh55YiB9MC9EyNGpVy8qcaTn4i19OmkhRW
 Default region name: us-east-2
 Default output format:
 ./egomimic/utils/aws/setup_secret.sh
+/data/sybeuret/codes/EgoVerse/egomimic/utils/aws/setup_secret.sh
 ```
 `setup_secret.sh` will allow your current env to download data from cloudflare.
 
