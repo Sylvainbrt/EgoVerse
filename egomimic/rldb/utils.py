@@ -211,8 +211,8 @@ class RLDBDataset(LeRobotDataset):
     def __getitem__(self, idx):
         """Fetch frames based on sampled indices in 'percent' mode, otherwise default to full dataset."""
         if self.sampled_indices is not None:
-            idx = self.sampled_indices[idx]  # Map index to sampled frames
-        item = super().__getitem__(idx)
+            idx = self.sampled_indices[idx]
+        item = super().__getitem__(idx)  # has video frames
 
         if self.use_task_string:
             item["high_level_language_prompt"] = self.task_string
@@ -222,20 +222,15 @@ class RLDBDataset(LeRobotDataset):
                 if key in item:
                     item[key] = self._slow_down_sequence(item[key])
 
+        # Get annotation from item directly (no separate hf_dataset lookup needed)
         ep_idx = int(item["episode_index"])
-        frame_idx = (
-            self.sampled_indices[idx] if self.sampled_indices is not None else idx
-        )
-
-        frame_item = self.hf_dataset[frame_idx]
-        frame_time = float(frame_item["timestamp"])
-
-        frame_item["annotations"] = self._get_frame_annotation(
+        frame_time = float(item["timestamp"])
+        item["annotations"] = self._get_frame_annotation(
             episode_idx=ep_idx,
             frame_time=frame_time,
         )
 
-        return frame_item
+        return item
 
     def _get_frame_annotation(
         self,
@@ -1205,6 +1200,15 @@ class DataSchematic(object):
                         data_list.append(res)
                 if data_list:
                     return np.concatenate(data_list, axis=0)
+            elif hasattr(ds, "hf_dataset"):
+                # LeRobotDataset / RLDBDataset (HuggingFace-backed)
+                try:
+                    column_data = ds.hf_dataset.with_format("numpy", columns=[col])[:][
+                        col
+                    ]
+                    return column_data
+                except (KeyError, ValueError):
+                    return None
             return None
 
         for column in norm_columns:

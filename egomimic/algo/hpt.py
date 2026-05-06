@@ -361,11 +361,11 @@ class HPTModel(nn.Module):
         feat_dict = {}
         expected_modalities = self.modalities.get(domain, []) + self.shared_keys
 
-        # --- DIAGNOSTIC: print key mismatch ---
-        print(f"[stem_process] domain='{domain}'")
-        print(f"  expected modalities : {expected_modalities}")
-        print(f"  data keys available : {list(data.keys())}")
-        # ---------------------------------------
+        # # --- DIAGNOSTIC: print key mismatch ---
+        # print(f"[stem_process] domain='{domain}'")
+        # print(f"  expected modalities : {expected_modalities}")
+        # print(f"  data keys available : {list(data.keys())}")
+        # # ---------------------------------------
 
         for modality in expected_modalities:
             if modality not in data:
@@ -959,6 +959,13 @@ class HPT(Algo):
 
     @override
     def process_batch_for_training(self, batch):
+        # # --- DEEP DEBUG: what does the raw dataloader actually give us? ---
+        # for embodiment_name, _batch in batch.items():
+        #     print(f"\n[RAW BATCH] embodiment='{embodiment_name}'")
+        #     for k, v in _batch.items():
+        #         shape = v.shape if isinstance(v, torch.Tensor) else type(v)
+        #         print(f"  {k}: {shape}")
+        # # -----------------------------------------------------------------
         processed_batch = {}
         for embodiment_name, _batch in batch.items():
             embodiment_id = get_embodiment_id(embodiment_name)
@@ -972,15 +979,16 @@ class HPT(Algo):
                 elif k == "actions_joints":
                     temp_batch["actions.joints_act"] = v
                 elif "img" in k or "cam" in k:
-                    # Re-namespace any image key back to observation.images.*
-                    temp_batch[f"observation.images.{k}"] = v
+                    # Strip any existing observation.images. prefix before re-adding it
+                    base_key = k.replace("observation.images.", "")
+                    temp_batch[f"observation.images.{base_key}"] = v
                 else:
                     temp_batch[k] = v
 
             # 2. Normalize safely
             norm_batch = self.data_schematic.normalize_data(temp_batch, embodiment_id)
-            print(f"[DEBUG] temp_batch keys : {list(temp_batch.keys())}")
-            print(f"[DEBUG] norm_batch keys : {list(norm_batch.keys())}")
+            # print(f"[DEBUG] temp_batch keys : {list(temp_batch.keys())}")
+            # print(f"[DEBUG] norm_batch keys : {list(norm_batch.keys())}")
 
             # 3. Forward-map back to HPT short names specifically required by Trunk
             for k, v in norm_batch.items():
