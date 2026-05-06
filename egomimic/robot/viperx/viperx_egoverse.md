@@ -164,3 +164,13 @@ If you encounter errors during initialization, verify the following:
 - keys_of_type Argument Error: The HPT.__init__ in egomimic/algo/hpt.py may be explicitly passing the embodiment_id flag. Verify that the line data_schematic.keys_of_type("action_keys") matches the signature in rldb/utils.py.
 - "Data not found" during NormStats inference: If debug logs report Skipping observation.state, double check string names. Note the difference between observation.(...) (singular) and observations.(...) (plural) in your YAML files versus info.json.
 - LeRobot Driver Issues during Rollout: If ViperXInterface fails to connect, ensure no other python scripts are grabbing the camera feed or serial ports simultaneously.
+
+---
+
+## Scaling & Cross-Embodiment Training Possibilities
+
+EgoVerse is designed to scale dynamically across diverse datasets and embodiments. Once your local single-robot training works, you can expand your configurations:
+
+1. **Multi-Robot Co-Training (Local)**: Train ViperX and Aria (or other arms) simultaneously. Create a `cotrain_viperx_aria.yaml` that feeds both local datasets into a shared Heterogeneous Pretrained Transformer (HPT) trunk using separate diffusion heads for joint space (ViperX) and Cartesian space (Aria).
+2. **Full Dataset Scale (S3/Cluster)**: Use `S3RLDBDataset` instead of `FolderRLDBDataset`. Point your dataloader directly to remote storage locations to leverage thousands of episodes across unified visual trunks via `scale.yaml`. You will need to increase compute (DDP across multiple GPUs) and your batch size.
+3. **Action-Free Human Co-Training**: Use Ego4D and Project Aria human demonstration datasets (`human_hands` embodiment) to heavily pre-train the model's visual trunk. The human data (which lacks explicit robot actions) improves visual representation learning, while your ViperX data fine-tunes the action-decoding head. 

@@ -1,0 +1,110 @@
+defaults:
+  - hpt_cotrain_enc_dec_base
+
+robomimic_model:
+  domains: ["viperx_right_arm", "aria_bimanual"]
+  
+  ac_keys:
+    viperx_right_arm: "actions_joints"
+    aria_bimanual: "actions_cartesian"
+  
+  diffusion: true
+  6dof: false
+
+  stem_specs:
+    viperx_right_arm:
+      right_wrist_img:
+        _target_: egomimic.models.hpt_nets.MLPPolicyStem
+        input_dim: 256
+        output_dim: 256
+        widths: [256]
+        specs:
+          random_horizon_masking: false
+          cross_attn:
+            crossattn_latent: 16
+            crossattn_heads: 8
+            crossattn_dim_head: 64
+            crossattn_modality_dropout: 0.1
+            modality_embed_dim: 256
+      joint_positions:
+        _target_: egomimic.models.hpt_nets.MLPPolicyStem
+        input_dim: 7
+        output_dim: 256
+        widths: [256]
+        specs:
+          random_horizon_masking: false
+          cross_attn:
+            crossattn_latent: 16
+            crossattn_heads: 8
+            crossattn_dim_head: 64
+            crossattn_modality_dropout: 0.1
+            modality_embed_dim: 256
+
+    aria_bimanual:
+      state_ee_pose:
+        _target_: egomimic.models.hpt_nets.MLPPolicyStem
+        input_dim: 12
+        output_dim: 256
+        widths: [256]
+        specs:
+          random_horizon_masking: false
+          cross_attn:
+            crossattn_latent: 16
+            crossattn_heads: 8
+            crossattn_dim_head: 64
+            crossattn_modality_dropout: 0.1
+            modality_embed_dim: 256
+
+  head_specs:
+    shared: null
+    viperx_right_arm: 
+      _target_: egomimic.models.fm_policy.FMPolicy
+      action_horizon: 100
+      num_inference_steps: 50
+      pooling: null
+      time_dist: "beta"
+      infer_ac_dims:
+        viperx_right_arm: 7
+      model:
+        _target_: egomimic.models.denoising_nets.CrossTransformer
+        nblocks: 6
+        cond_dim: 256
+        hidden_dim: 128
+        act_dim: 7
+        act_seq: 100
+        n_heads: 4
+        dropout: 0.1
+        mlp_layers: 4
+        mlp_ratio: 4
+
+    aria_bimanual: 
+      _target_: egomimic.models.fm_policy.FMPolicy
+      action_horizon: 100
+      num_inference_steps: 50
+      pooling: null
+      time_dist: "beta"
+      infer_ac_dims:
+        aria_bimanual: 12
+      model:
+        _target_: egomimic.models.denoising_nets.CrossTransformer
+        nblocks: 6
+        cond_dim: 256
+        hidden_dim: 128
+        act_dim: 12
+        act_seq: 100
+        n_heads: 4
+        dropout: 0.1
+        mlp_layers: 4 
+        mlp_ratio: 4
+        
+optimizer:
+  _target_: torch.optim.AdamW
+  _partial_: true
+  lr: 1e-4
+  weight_decay: 0.0001
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.CosineAnnealingLR
+  _partial_: true
+  T_max: 1400
+  eta_min: 1e-5

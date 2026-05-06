@@ -1,0 +1,21 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  viperx:
+    _target_: egomimic.rldb.utils.S3RLDBDataset
+    s3_path: s3://egoverse-datasets/viperx_full
+    embodiment: viperx_right_arm
+    mode: train
+    # ... standard viperx mapping ...
+
+  ego4d_human:
+    _target_: egomimic.rldb.utils.S3RLDBDataset
+    s3_path: s3://egoverse-datasets/ego4d_human_demonstrations
+    embodiment: human_hands
+    mode: train
+    camera_keys:
+      - observation.images.egocentric
+    resolver:
+      key_map:
+        observation.images.egocentric: front_img_1
+        # Human data might not have structural actions, so EgoVerse usually applies a dummy action or masks the loss for this head
