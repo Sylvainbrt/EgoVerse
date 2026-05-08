@@ -2,11 +2,11 @@ defaults:
   - hpt_cotrain_enc_dec_base
 
 robomimic_model:
-  domains: ["viperx_right_arm", "aria_bimanual"]
+  domains: ["viperx_right_arm", "aria_right_arm"]
   
   ac_keys:
     viperx_right_arm: "actions_joints"
-    aria_bimanual: "actions_cartesian"
+    aria_right_arm: "actions_cartesian"
   
   diffusion: true
   6dof: false
@@ -40,10 +40,10 @@ robomimic_model:
             crossattn_modality_dropout: 0.1
             modality_embed_dim: 256
 
-    aria_bimanual:
+    aria_right_arm:
       state_ee_pose:
         _target_: egomimic.models.hpt_nets.MLPPolicyStem
-        input_dim: 12
+        input_dim: 6
         output_dim: 256
         widths: [256]
         specs:
@@ -59,7 +59,7 @@ robomimic_model:
     shared: null
     viperx_right_arm: 
       _target_: egomimic.models.fm_policy.FMPolicy
-      action_horizon: 100
+      action_horizon: 64
       num_inference_steps: 50
       pooling: null
       time_dist: "beta"
@@ -71,27 +71,27 @@ robomimic_model:
         cond_dim: 256
         hidden_dim: 128
         act_dim: 7
-        act_seq: 100
+        act_seq: 64
         n_heads: 4
         dropout: 0.1
         mlp_layers: 4
         mlp_ratio: 4
 
-    aria_bimanual: 
+    aria_right_arm: 
       _target_: egomimic.models.fm_policy.FMPolicy
-      action_horizon: 100
+      action_horizon: 64
       num_inference_steps: 50
       pooling: null
       time_dist: "beta"
       infer_ac_dims:
-        aria_bimanual: 12
+        aria_right_arm: 6
       model:
         _target_: egomimic.models.denoising_nets.CrossTransformer
         nblocks: 6
         cond_dim: 256
         hidden_dim: 128
-        act_dim: 12
-        act_seq: 100
+        act_dim: 6
+        act_seq: 64
         n_heads: 4
         dropout: 0.1
         mlp_layers: 4 

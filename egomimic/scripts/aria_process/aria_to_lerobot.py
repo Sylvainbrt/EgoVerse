@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import cv2
+import datasets
 import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
 import lerobot.datasets.video_utils as video_utils
 import numpy as np
@@ -50,6 +51,42 @@ from egomimic.utils.egomimicUtils import (
 )
 
 _root = psutil.Process(os.getpid())
+
+# ==============================================================================
+# HUGGINGFACE VALUE PATCH
+# Intercepts HuggingFace dataset creation to flatten (N, 1) Arrays into (N) Scalars.
+# This prevents "TypeError: only 0-dimensional arrays can be converted to Python scalars"
+# while allowing LeRobot's validate_frame to safely process (1,) shapes.
+# ==============================================================================
+if not hasattr(datasets.Dataset, "_is_patched_for_lerobot"):
+    orig_from_dict = datasets.Dataset.from_dict
+
+    @classmethod
+    def safe_from_dict(cls, mapping: dict, features=None, **kwargs):
+        if features is not None:
+            for k, feat in features.items():
+                if isinstance(feat, datasets.Value) and k in mapping:
+                    col = mapping[k]
+                    # Flatten PyTorch Tensors/Numpy Arrays
+                    if hasattr(col, "squeeze"):
+                        sz = col.shape
+                        if len(sz) >= 2 and sz[-1] == 1:
+                            mapping[k] = col.squeeze(-1).tolist()
+                    # Flatten raw python lists of single-element arrays
+                    elif isinstance(col, list):
+                        mapping[k] = [
+                            v.item()
+                            if hasattr(v, "item")
+                            else (
+                                v[0] if (hasattr(v, "__len__") and len(v) == 1) else v
+                            )
+                            for v in col
+                        ]
+        return orig_from_dict(mapping, features=features, **kwargs)
+
+    datasets.Dataset.from_dict = safe_from_dict
+    datasets.Dataset._is_patched_for_lerobot = True
+# ==============================================================================
 
 
 # --------- LEROBOT AV1 CODEC BUG FIX ---------
@@ -1555,47 +1592,39 @@ class DatasetConverter:
     def extract_episode(self, episode_path, task_description: str = ""):
         """
         Extracts frames from an episode and saves them to the dataset.
-        Parameters
-        ----------
-        episode_path : str
-            The path to the episode file.
-        task_description : str, optional
-            A description of the task associated with the episode (default is an empty string).
-        Returns
-        -------
-        None
         """
         # --------- THE ULTIMATE SHAPE FIX ---------
-        # Monkey-patch the final Hugging Face ingest step to ensure all (1,) shapes
-        # are actually (N, 1) arrays/tensors, catching both user fields and auto-generated fields.
-        if not hasattr(self.dataset, "_is_patched_for_scalars"):
-            orig_save = self.dataset._save_episode_data
+        # Since utils.py correctly maps shape (1,) to datasets.Value (0D scalars)
+        # we must squeeze the episode buffer manually purely for HF right before saving,
+        # but allow validate_frame to receive the untouched (1,) array!
+        if not hasattr(self.dataset, "_is_patched_for_hf_value"):
+            orig_save_episode_data = self.dataset._save_episode_data
 
-            def safe_save_episode_data(ep_dict):
-                for k, v in ep_dict.items():
-                    if k in self.dataset.features and self.dataset.features[k].get(
-                        "shape"
-                    ) == (1,):
-                        # Ensure the batch is shaped (N, 1) for Hugging Face while preserving array math
-                        if isinstance(v, torch.Tensor):
-                            if v.ndim == 1:
-                                ep_dict[k] = v.unsqueeze(1)
-                        elif isinstance(v, np.ndarray):
-                            if v.ndim == 1:
-                                ep_dict[k] = np.expand_dims(v, 1)
-                        elif isinstance(v, list):
-                            arr = np.array(v)
-                            if arr.ndim == 1:
-                                ep_dict[k] = np.expand_dims(arr, 1)
-                            else:
-                                ep_dict[k] = arr.reshape(-1, 1)
-                return orig_save(ep_dict)
+            def safe_save_episode_data(episode_buffer):
+                # Target all features marked as shape (1,)
+                for k in episode_buffer:
+                    if k in self.features and self.features[k]["shape"] == (1,):
+                        val = episode_buffer[k]
+                        # Flatten (N, 1) Torch tensors directly to 0-dimensional lists of length N
+                        if (
+                            isinstance(val, torch.Tensor)
+                            and val.ndim == 2
+                            and val.shape[1] == 1
+                        ):
+                            episode_buffer[k] = val.squeeze(1)
+                        # Fallback for raw standard python lists of ndarrays
+                        elif (
+                            isinstance(val, list)
+                            and len(val) > 0
+                            and getattr(val[0], "shape", None) == (1,)
+                        ):
+                            episode_buffer[k] = [v.item() for v in val]
+
+                return orig_save_episode_data(episode_buffer)
 
             self.dataset._save_episode_data = safe_save_episode_data
-            self.dataset._is_patched_for_scalars = True
+            self.dataset._is_patched_for_hf_value = True
         # ------------------------------------------
-
-        image_frames = []
 
         image_frames = []
         for i, frame in enumerate(
@@ -1608,10 +1637,11 @@ class DatasetConverter:
                 self.benchmark,
             )
         ):
-            # 1. Provide the string instruction for LeRobot's mandatory task feature
+            # 1. Ensure Task exists
             frame["task"] = task_description
 
-            # 2. Add the frame (timestamp omitted to let LeRobot auto-generate it correctly)
+            # 2. Add Frame
+            # Note: No manual buffer modifications needed anymore! The monkey patch catches everything safely.
             self.dataset.add_frame(frame)
 
             # Store images for preview video if needed
@@ -1621,7 +1651,7 @@ class DatasetConverter:
             ):
                 image_frames.append(frame["observations.images.front_img_1"])
 
-        # Flush and save the episode to parquet (this triggers the patch safely)
+        # Flush and save the episode to parquet
         self.dataset.save_episode()
 
         if self._mp4_path is not None and len(image_frames) > 0:

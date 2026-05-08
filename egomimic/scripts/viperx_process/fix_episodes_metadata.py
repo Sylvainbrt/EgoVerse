@@ -3,6 +3,7 @@ Add missing video metadata columns to episodes parquet.
 Run once to fix the dataset after lerobot-record conversion.
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -57,7 +58,16 @@ def fix_episodes_metadata(dataset_root: Path):
 
 
 if __name__ == "__main__":
-    dataset_root = Path(
-        "/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data/pick_and_place_egoverse"
+    parser = argparse.ArgumentParser(
+        description="Fix missing video metadata columns in episodes parquet."
     )
+    parser.add_argument(
+        "--dataset-root",
+        type=str,
+        default="/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data/pick_and_place_egoverse",
+        help="Path to the root directory of the dataset",
+    )
+    args = parser.parse_args()
+
+    dataset_root = Path(args.dataset_root)
     fix_episodes_metadata(dataset_root)

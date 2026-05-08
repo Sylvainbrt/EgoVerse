@@ -1,7 +1,7 @@
 _target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
 
 train_datasets:
-  viperx:
+  viperx_right_arm:
     _target_: egomimic.rldb.utils.FolderRLDBDataset
     folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
     embodiment: viperx_right_arm
@@ -16,21 +16,21 @@ train_datasets:
         actions.joints_act: actions_joints
         observation.state: joint_positions
 
-  aria:
+  aria_right_arm:
     _target_: egomimic.rldb.utils.FolderRLDBDataset
-    folder_path: /data/sybeuret/remote_data_lerobot/aria_local_data # UPDATE THIS PATH
-    embodiment: aria_bimanual
+    folder_path: /data/sybeuret/remote_aria_data/egoverse_data
+    embodiment: aria_right_arm
     mode: train
     camera_keys:
-      - observation.images.front_img_1
+      - observations.images.front_img_1
     resolver:
       key_map:
-        observation.images.front_img_1: front_img_1
+        observations.images.front_img_1: front_img_1
         actions.cartesian_act: actions_cartesian
-        observation.state: ee_pose
+        observations.state.ee_pose: state_ee_pose
 
 valid_datasets:
-  viperx:
+  viperx_right_arm:
     _target_: egomimic.rldb.utils.FolderRLDBDataset
     folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
     embodiment: viperx_right_arm
@@ -45,10 +45,10 @@ valid_datasets:
         actions.joints_act: actions_joints
         observation.state: joint_positions
 
-  aria:
+  aria_right_arm:
     _target_: egomimic.rldb.utils.FolderRLDBDataset
-    folder_path: /data/sybeuret/remote_data_lerobot/aria_local_data # UPDATE THIS PATH
-    embodiment: aria_bimanual
+    folder_path: /data/sybeuret/remote_aria_data/egoverse_data
+    embodiment: aria_right_arm
     mode: valid
     camera_keys:
       - observation.images.front_img_1
@@ -59,17 +59,17 @@ valid_datasets:
         observation.state: ee_pose
 
 train_dataloader_params:
-  viperx:
+  viperx_right_arm:
     batch_size: 8
     num_workers: 4
-  aria:
+  aria_right_arm:
     batch_size: 8
     num_workers: 4
 
 valid_dataloader_params:
-  viperx:
+  viperx_right_arm:
     batch_size: 8
     num_workers: 4
-  aria:
+  aria_right_arm:
     batch_size: 8
     num_workers: 4
