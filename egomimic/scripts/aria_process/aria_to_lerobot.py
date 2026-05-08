@@ -1,11 +1,13 @@
 import argparse
 import ctypes
 import gc
+import glob
 import logging
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -51,39 +53,67 @@ _root = psutil.Process(os.getpid())
 
 
 # --------- LEROBOT AV1 CODEC BUG FIX ---------
-# PyAV fails to flush H264 outputs cleanly on some distributions resulting in 28kb empty files.
-# We bypass PyAV entirely and use standard terminal ffmpeg to build the dataset videos via globbing.
 def _patched_encode_video_frames(img_dir, video_path, fps, overwrite=True, **kwargs):
-    import subprocess
-    from pathlib import Path
-
     img_dir_path = Path(img_dir).absolute()
-    ext = "png"
-    # Check if LeRobot wrote jpgs instead
-    if not list(img_dir_path.glob("*.png")):
-        ext = "jpg"
+
+    prev_count = -1
+    stable_ticks = 0
+    while stable_ticks < 3:
+        frames = sorted(glob.glob(str(img_dir_path / "*.png")))
+        ext = "png"
+        if not frames:
+            frames = sorted(glob.glob(str(img_dir_path / "*.jpg")))
+            ext = "jpg"
+        count = len(frames)
+        if count == prev_count and count > 0:
+            stable_ticks += 1
+        else:
+            stable_ticks = 0
+        prev_count = count
+        time.sleep(0.5)
+
+    if not frames:
+        raise RuntimeError(f"[encode_video_frames] No frames found in {img_dir_path}")
+
+    print(f"[DEBUG ENCODE] Found {len(frames)} frames to encode in {img_dir_path}")
+
+    import re
+
+    first_name = Path(frames[0]).stem
+    match = re.search(r"^(.*?)(\d+)$", first_name)
+    if match:
+        prefix = match.group(1)
+        num_digits = len(match.group(2))
+        start_number = int(match.group(2))
+        pattern = str(img_dir_path / f"{prefix}%0{num_digits}d.{ext}")
+    else:
+        raise RuntimeError(f"Cannot parse pattern: {first_name}")
 
     cmd = [
         "ffmpeg",
         "-y",
         "-framerate",
         str(fps),
-        "-pattern_type",
-        "glob",
+        "-start_number",
+        str(start_number),
         "-i",
-        f"{img_dir_path}/*.{ext}",
+        pattern,
         "-c:v",
         "libx264",
         "-pix_fmt",
         "yuv420p",
         "-crf",
         "18",
+        "-r",
+        str(fps),
+        "-movflags",
+        "+faststart",
         str(Path(video_path).absolute()),
     ]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if res.returncode != 0:
         raise RuntimeError(
-            f"FFmpeg encode failed: {res.stderr.decode('utf-8', errors='ignore')}"
+            f"FFmpeg encode \n{res.stderr.decode('utf-8', errors='ignore')}"
         )
 
 
@@ -93,8 +123,6 @@ lerobot_dataset_module.encode_video_frames = _patched_encode_video_frames
 
 
 # --------- PYAV CANONICAL_NAME BUG FIX ---------
-# Older versions of PyAV lack the 'canonical_name' attribute on the Codec object.
-# We replace LeRobot's get_video_info to safely fallback to 'name'.
 def _patched_get_video_info(video_path) -> dict:
     import av
 
@@ -121,17 +149,19 @@ lerobot_dataset_module.get_video_info = _patched_get_video_info
 
 # -----------------------------------------------
 # --------- PYAV CONCATENATE BUG FIX ---------
-# Older versions of PyAV lack `add_stream_from_template`.
-# We patch `concatenate_video_files` to use standard ffmpeg CLI which is faster and bug-free.
 def _patched_concatenate_video_files(input_paths, output_path):
-    import subprocess
-    import tempfile
+    print(
+        f"[DEBUG CONCAT] Concatenating {len(input_paths)} video chunks into {output_path}..."
+    )
+    for idx, p in enumerate(input_paths):
+        print(f"  - Chunk {idx}: {p} (Exists: {os.path.exists(p)})")
 
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
         for p in input_paths:
-            # Create a text file with paths formatted for ffmpeg concat demuxer
             f.write(f"file '{Path(p).absolute()}'\n")
         list_file = f.name
+
+    tmp_output = str(Path(output_path).absolute()) + ".tmp.mp4"
 
     try:
         cmd = [
@@ -143,18 +173,30 @@ def _patched_concatenate_video_files(input_paths, output_path):
             "0",
             "-i",
             list_file,
-            "-c",
-            "copy",
-            str(Path(output_path).absolute()),
+            # Safely filter the PTS to regenerate sequential timestamps!
+            "-vf",
+            "setpts=N/FRAME_RATE/TB",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            tmp_output,
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if res.returncode != 0:
             raise RuntimeError(
-                f"FFmpeg concat failed: {res.stderr.decode('utf-8', errors='ignore')}"
+                f"FFmpeg concat failed:\n{res.stderr.decode('utf-8', errors='ignore')}"
             )
+
+        # Overwrite the original output path safely now that encoding is done
+        shutil.move(tmp_output, output_path)
     finally:
         if os.path.exists(list_file):
             os.remove(list_file)
+        if os.path.exists(tmp_output):
+            os.remove(tmp_output)
+
+    print("[DEBUG CONCAT] Successfully stitched videos.")
 
 
 video_utils.concatenate_video_files = _patched_concatenate_video_files
