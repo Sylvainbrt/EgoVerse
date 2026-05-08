@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Dict, List
 
 import cv2
+import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
+import lerobot.datasets.video_utils as video_utils
 import numpy as np
 import psutil
 import torch
@@ -26,13 +28,14 @@ from aria_utils import (
     transform_coordinates,
     undistort_to_linear,
 )
-from lerobot.common.datasets.lerobot_dataset import LEROBOT_HOME, LeRobotDataset
+from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
 from projectaria_tools.core import data_provider, mps
 from projectaria_tools.core.mps.utils import (
     get_nearest_hand_tracking_result,
 )
 from projectaria_tools.core.sensor_data import TimeDomain, TimeQueryOptions
 from projectaria_tools.core.stream_id import StreamId
+from tqdm import tqdm
 
 from egomimic.rldb.embodiment.embodiment import EMBODIMENT
 from egomimic.utils.egomimicUtils import (
@@ -45,6 +48,119 @@ from egomimic.utils.egomimicUtils import (
 )
 
 _root = psutil.Process(os.getpid())
+
+
+# --------- LEROBOT AV1 CODEC BUG FIX ---------
+# PyAV fails to flush H264 outputs cleanly on some distributions resulting in 28kb empty files.
+# We bypass PyAV entirely and use standard terminal ffmpeg to build the dataset videos via globbing.
+def _patched_encode_video_frames(img_dir, video_path, fps, overwrite=True, **kwargs):
+    import subprocess
+    from pathlib import Path
+
+    img_dir_path = Path(img_dir).absolute()
+    ext = "png"
+    # Check if LeRobot wrote jpgs instead
+    if not list(img_dir_path.glob("*.png")):
+        ext = "jpg"
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-framerate",
+        str(fps),
+        "-pattern_type",
+        "glob",
+        "-i",
+        f"{img_dir_path}/*.{ext}",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        "18",
+        str(Path(video_path).absolute()),
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"FFmpeg encode failed: {res.stderr.decode('utf-8', errors='ignore')}"
+        )
+
+
+video_utils.encode_video_frames = _patched_encode_video_frames
+lerobot_dataset_module.encode_video_frames = _patched_encode_video_frames
+# ---------------------------------------------
+
+
+# --------- PYAV CANONICAL_NAME BUG FIX ---------
+# Older versions of PyAV lack the 'canonical_name' attribute on the Codec object.
+# We replace LeRobot's get_video_info to safely fallback to 'name'.
+def _patched_get_video_info(video_path) -> dict:
+    import av
+
+    with av.open(str(video_path)) as container:
+        video_stream = container.streams.video[0]
+        video_info = {
+            "video.fps": float(video_stream.average_rate),
+            "video.codec": getattr(
+                video_stream.codec, "canonical_name", video_stream.codec.name
+            ),
+            "video.pix_fmt": video_stream.pix_fmt,
+            "video.is_depth_map": False,
+            "has_audio": bool(container.streams.audio),
+        }
+        video_info["video.n_frames"] = video_stream.frames
+        if video_info["video.n_frames"] == 0:
+            video_info["video.n_frames"] = sum(1 for _ in container.decode(video=0))
+        return video_info
+
+
+video_utils.get_video_info = _patched_get_video_info
+lerobot_dataset_module.get_video_info = _patched_get_video_info
+
+
+# -----------------------------------------------
+# --------- PYAV CONCATENATE BUG FIX ---------
+# Older versions of PyAV lack `add_stream_from_template`.
+# We patch `concatenate_video_files` to use standard ffmpeg CLI which is faster and bug-free.
+def _patched_concatenate_video_files(input_paths, output_path):
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
+        for p in input_paths:
+            # Create a text file with paths formatted for ffmpeg concat demuxer
+            f.write(f"file '{Path(p).absolute()}'\n")
+        list_file = f.name
+
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_file,
+            "-c",
+            "copy",
+            str(Path(output_path).absolute()),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg concat failed: {res.stderr.decode('utf-8', errors='ignore')}"
+            )
+    finally:
+        if os.path.exists(list_file):
+            os.remove(list_file)
+
+
+video_utils.concatenate_video_files = _patched_concatenate_video_files
+if hasattr(lerobot_dataset_module, "concatenate_video_files"):
+    lerobot_dataset_module.concatenate_video_files = _patched_concatenate_video_files
+# --------------------------------------------
 
 
 def _proc_rss_mb(p: psutil.Process) -> float:
@@ -461,8 +577,9 @@ class AriaVRSExtractor:
         else:
             value = EMBODIMENT.ARIA_BIMANUAL.value
 
+        # Revert back to shape [num_timesteps, 1] so it perfectly matches LeRobot's (1,) shape
         episode_feats["metadata.embodiment"] = np.full(
-            (num_timesteps, 1), value, dtype=np.int32
+            (num_timesteps, 1), int(value), dtype=np.int32
         )
 
         return episode_feats
@@ -1017,6 +1134,9 @@ class AriaVRSExtractor:
                 frame = {}
 
                 for feature_id, _info in features.items():
+                    if feature_id in ["timestamp", "task"]:
+                        continue
+
                     if feature_id.startswith("observations."):
                         key = feature_id.split(".", 1)[
                             -1
@@ -1033,17 +1153,22 @@ class AriaVRSExtractor:
                         if "images" in feature_id:
                             if image_compressed:
                                 img = cv2.imdecode(value[frame_idx], 1)  # HWC BGR uint8
-                                frame[feature_id] = (
-                                    torch.from_numpy(img).permute(2, 0, 1).contiguous()
-                                )  # CHW uint8
+                                frame[feature_id] = torch.from_numpy(img).contiguous()
                             else:
-                                frame[feature_id] = (
-                                    torch.from_numpy(value[frame_idx])
-                                    .permute(2, 0, 1)
-                                    .contiguous()
-                                )  # HWC -> CHW
+                                frame[feature_id] = torch.from_numpy(
+                                    value[frame_idx]
+                                ).contiguous()
                         else:
-                            frame[feature_id] = torch.from_numpy(value[frame_idx])
+                            # Keep integers as int32, downcast floats to float32
+                            if "int" in str(value.dtype):
+                                frame[feature_id] = torch.from_numpy(
+                                    value[frame_idx].astype(np.int32)
+                                )
+                            else:
+                                frame[feature_id] = torch.from_numpy(
+                                    value[frame_idx].astype(np.float32)
+                                )
+
                     elif isinstance(value, torch.Tensor):
                         frame[feature_id] = value[frame_idx]
                     else:
@@ -1059,89 +1184,42 @@ class AriaVRSExtractor:
     def define_features(
         episode_feats: dict, image_compressed: bool = True, encode_as_video: bool = True
     ) -> tuple:
-        """
-        Define features from episode_feats (output of process_episode), including a metadata section.
-
-        Parameters
-        ----------
-        episode_feats : dict
-            The output of the process_episode method, containing feature data.
-        image_compressed : bool, optional
-            Whether the images are compressed, by default True.
-        encode_as_video : bool, optional
-            Whether to encode images as video or as images, by default True.
-
-        Returns
-        -------
-        tuple of dict[str, dict]
-            A dictionary where keys are feature names and values are dictionaries
-            containing feature information such as dtype, shape, and dimension names,
-            and a separate dictionary for metadata (unused for now)
-        """
         features = {}
         metadata = {}
+
+        # Safely loop without modifying dictionary while parsing
         for key, value in episode_feats.items():
-            if isinstance(value, dict):  # Handle nested dictionaries recursively
-                nested_features, nested_metadata = AriaVRSExtractor.define_features(
-                    value, image_compressed, encode_as_video
-                )
-                features.update(
-                    {
-                        f"{key}.{nested_key}": nested_value
-                        for nested_key, nested_value in nested_features.items()
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    features[f"observations.{k}"] = {
+                        "dtype": "float32"
+                        if hasattr(v, "dtype") and "float" in str(v.dtype)
+                        else "int32",
+                        "shape": v.shape[1:],
+                        "names": [f"dim_{i}" for i in range(len(v.shape) - 1)],
                     }
-                )
-                features.update(
-                    {
-                        f"{key}.{nested_key}": nested_value
-                        for nested_key, nested_value in nested_metadata.items()
-                    }
-                )
-            elif isinstance(value, np.ndarray):
-                dtype = str(value.dtype)
-                if "images" in key:
-                    dtype = "video" if encode_as_video else "image"
-                    if image_compressed:
-                        decompressed_sample = cv2.imdecode(value[0], 1)
-                        shape = (
-                            decompressed_sample.shape[1],
-                            decompressed_sample.shape[0],
-                            decompressed_sample.shape[2],
-                        )
-                    else:
-                        shape = value.shape[1:]  # Skip the frame count dimension
-                    dim_names = ["channel", "height", "width"]
-                elif "actions" in key and len(value[0].shape) > 1:
-                    shape = value[0].shape
-                    dim_names = ["chunk_length", "action_dim"]
-                    dtype = f"prestacked_{str(value.dtype)}"
-                else:
-                    shape = value[0].shape
-                    dim_names = [f"dim_{i}" for i in range(len(shape))]
-                features[key] = {
-                    "dtype": dtype,
-                    "shape": shape,
-                    "names": dim_names,
-                }
-            elif isinstance(value, torch.Tensor):
-                dtype = str(value.dtype)
-                if "actions" in key and len(tuple(value[0].size())) > 1:
-                    dim_names = ["chunk_length", "action_dim"]
-                    dtype = f"prestacked_{str(value.dtype)}"
-                else:
-                    dim_names = [f"dim_{i}" for i in range(len(shape))]
-                shape = tuple(value[0].size())
-                dim_names = [f"dim_{i}" for i in range(len(shape))]
-                features[key] = {
-                    "dtype": dtype,
-                    "shape": shape,
-                    "names": dim_names,
-                }
+                    if "images" in k:
+                        if encode_as_video:
+                            features[f"observations.{k}"]["dtype"] = "video"
+                        elif image_compressed:
+                            features[f"observations.{k}"]["dtype"] = "image"
+                        features[f"observations.{k}"]["names"] = [
+                            "height",
+                            "width",
+                            "channel",
+                        ]
             else:
-                metadata[key] = {
-                    "dtype": "metadata",
-                    "value": value,
+                features[key] = {
+                    "dtype": "float32"
+                    if hasattr(value, "dtype") and "float" in str(value.dtype)
+                    else "int32",
+                    "shape": value.shape[1:],
+                    "names": [f"dim_{i}" for i in range(len(value.shape) - 1)],
                 }
+
+        # Override specific names if wanted
+        if "actions_cartesian" in features:
+            features["actions_cartesian"]["names"] = ["chunk_length", "action_dim"]
 
         return features, metadata
 
@@ -1280,13 +1358,13 @@ class DatasetConverter:
         No fallbacks. Requires `ffmpeg` with libx264 on PATH.
 
         Each frame dict must contain:
-            'observations.images.front_img_1' -> torch.Tensor (C,H,W) uint8
+            'observations.images.front_img_1' -> torch.Tensor (H,W,C) uint8
         """
 
         imgs = image_frames
 
-        # Compute half-res (force even dims for yuv420p)
-        C, H, W = imgs[0].shape
+        # Image tensors from LeRobot are HWC (Height, Width, Channels)
+        H, W, C = imgs[0].shape
         outW, outH = W // 2, H // 2
         if outW % 2:
             outW -= 1
@@ -1299,27 +1377,38 @@ class DatasetConverter:
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         rgb_frames = []
-        for chw in imgs:
-            # chw: (C,H,W) uint8, BGR from cv2.imdecode earlier
-            t = chw.detach().cpu()
+        for hwc in imgs:
+            # Safely handle both NumPy arrays and PyTorch Tensors
+            if isinstance(hwc, np.ndarray):
+                t = torch.from_numpy(hwc)
+            else:
+                t = hwc.detach().cpu()
+
             if t.dtype != torch.uint8:
                 t = t.to(torch.uint8)
+
+            # Permute to CHW for PyTorch interpolate
+            t = t.permute(2, 0, 1).contiguous()
 
             # If grayscale, repeat to 3 channels
             if t.shape[0] == 1:
                 t = t.repeat(3, 1, 1)
 
-            # Resize to (outH, outW)
-            t_resized = F.interpolate(
-                t.unsqueeze(0),  # (1,C,H,W)
-                size=(outH, outW),
-                mode="bilinear",
-                align_corners=False,
-            ).squeeze(0)  # (C,outH,outW)
+            # Resize to (outH, outW) requires float for bilinear
+            t_resized = (
+                F.interpolate(
+                    t.unsqueeze(0).float(),  # (1,C,H,W)
+                    size=(outH, outW),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                .squeeze(0)
+                .to(torch.uint8)
+            )  # (C,outH,outW)
 
-            # BGR -> RGB, then (H,W,C)
-            hwc = t_resized.permute(1, 2, 0).contiguous()  # (H,W,3), uint8
-            rgb_frames.append(hwc)
+            # CHW -> HWC
+            hwc_resized = t_resized.permute(1, 2, 0).contiguous()  # (H,W,3), uint8
+            rgb_frames.append(hwc_resized)
 
         video_tensor = torch.stack(rgb_frames, dim=0)  # (T, H, W, 3) uint8
 
@@ -1434,6 +1523,38 @@ class DatasetConverter:
         -------
         None
         """
+        # --------- THE ULTIMATE SHAPE FIX ---------
+        # Monkey-patch the final Hugging Face ingest step to ensure all (1,) shapes
+        # are actually (N, 1) arrays/tensors, catching both user fields and auto-generated fields.
+        if not hasattr(self.dataset, "_is_patched_for_scalars"):
+            orig_save = self.dataset._save_episode_data
+
+            def safe_save_episode_data(ep_dict):
+                for k, v in ep_dict.items():
+                    if k in self.dataset.features and self.dataset.features[k].get(
+                        "shape"
+                    ) == (1,):
+                        # Ensure the batch is shaped (N, 1) for Hugging Face while preserving array math
+                        if isinstance(v, torch.Tensor):
+                            if v.ndim == 1:
+                                ep_dict[k] = v.unsqueeze(1)
+                        elif isinstance(v, np.ndarray):
+                            if v.ndim == 1:
+                                ep_dict[k] = np.expand_dims(v, 1)
+                        elif isinstance(v, list):
+                            arr = np.array(v)
+                            if arr.ndim == 1:
+                                ep_dict[k] = np.expand_dims(arr, 1)
+                            else:
+                                ep_dict[k] = arr.reshape(-1, 1)
+                return orig_save(ep_dict)
+
+            self.dataset._save_episode_data = safe_save_episode_data
+            self.dataset._is_patched_for_scalars = True
+        # ------------------------------------------
+
+        image_frames = []
+
         image_frames = []
         for i, frame in enumerate(
             AriaVRSExtractor.iter_episode_frames(
@@ -1445,23 +1566,28 @@ class DatasetConverter:
                 self.benchmark,
             )
         ):
-            self.buffer.append(frame)
-            if self._mp4_path is not None:
-                image = frame["observations.images.front_img_1"]
-                image_frames.append(image)
+            # 1. Provide the string instruction for LeRobot's mandatory task feature
+            frame["task"] = task_description
 
-            if len(self.buffer) == EPISODE_LENGTH:
-                for f in self.buffer:
-                    self.dataset.add_frame(f)
+            # 2. Add the frame (timestamp omitted to let LeRobot auto-generate it correctly)
+            self.dataset.add_frame(frame)
 
-                self.logger.info(f"Saving Episode after {i + 1} frames...")
-                self.dataset.save_episode(task=task_description)
-                self.buffer.clear()
-        if self._mp4_path is not None:
-            ep_stem = Path(episode_path).stem
-            mp4_path = self._mp4_path / f"{ep_stem}_video.mp4"
+            # Store images for preview video if needed
+            if (
+                self._mp4_path is not None
+                and "observations.images.front_img_1" in frame
+            ):
+                image_frames.append(frame["observations.images.front_img_1"])
+
+        # Flush and save the episode to parquet (this triggers the patch safely)
+        self.dataset.save_episode()
+
+        if self._mp4_path is not None and len(image_frames) > 0:
             self.save_preview_mp4(
-                image_frames, mp4_path, self.fps, self.image_compressed
+                image_frames=image_frames,
+                output_path=self._mp4_path / f"{episode_path.stem}_video.mp4",
+                fps=self.fps,
+                image_compressed=self.image_compressed,
             )
 
     def extract_episodes(self, episode_description: str = ""):
@@ -1481,21 +1607,23 @@ class DatasetConverter:
         """
 
         with mem_section("extract_episodes", enabled=self.benchmark):
-            for episode_path in self.episode_list:
+            for episode_path in tqdm(self.episode_list, desc="Extracting episodes"):
                 try:
                     self.extract_episode(
-                        episode_path, task_description=episode_description
+                        episode_path=episode_path, task_description=episode_description
                     )
                 except Exception as e:
-                    self.logger.error(f"Error processing episode {episode_path}: {e}")
-                    traceback.print_exc()
-                    continue
+                    self.logger.error(
+                        f"Error processing episode {episode_path}: {e}\n{traceback.format_exc()}"
+                    )
+                    self.dataset.episode_buffer = {}
 
         self.buffer.clear()
         t0 = time.time()
-        self.dataset.consolidate()
+        # 3. Call finalize() instead of consolidate()
+        self.dataset.finalize()
         elapsed_time = time.time() - t0
-        self.logger.info(f"Episode consolidation time: {elapsed_time:.2f}")
+        self.logger.info(f"Dataset finalization time: {elapsed_time:.2f}")
 
     def push_dataset_to_hub(
         self,
@@ -1552,6 +1680,20 @@ class DatasetConverter:
         self._out_base = Path(output_dir)
 
         output_dir = output_dir / name
+
+        # --------- LEROBOT AV1 CODEC FIX ---------
+        # LeRobot v3 defaults to libsvtav1, which is missing from most pyav/ffmpeg standard binaries.
+        # We force it to use libx264 (H.264) which is universally supported.
+        for key, feat in self.features.items():
+            if feat.get("dtype") == "video":
+                feat["video_info"] = {
+                    "video.fps": float(self.fps),
+                    "video.codec": "libx264",
+                    "video.pix_fmt": "yuv420p",
+                    "video.is_depth_map": False,
+                    "has_audio": False,
+                }
+        # -----------------------------------------
 
         self.dataset = LeRobotDataset.create(
             repo_id=self.dataset_repo_id,
@@ -1649,7 +1791,7 @@ def argument_parse():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(LEROBOT_HOME),
+        default=Path(HF_LEROBOT_HOME),
         help="Directory where the processed dataset will be stored. Defaults to LEROBOT_HOME.",
     )
     parser.add_argument(
