@@ -68,7 +68,7 @@ data_schematic: # Dynamically fill in these shapes from the dataset
       front_img_1:
         key_type: camera_keys
         lerobot_key: observations.images.front_img_1
-      ee_pose:
+      state_ee_pose:
         key_type: proprio_keys
         lerobot_key: observations.state.ee_pose
       actions_cartesian:
@@ -81,7 +81,7 @@ data_schematic: # Dynamically fill in these shapes from the dataset
       front_img_1:
         key_type: camera_keys
         lerobot_key: observations.images.front_img_1
-      ee_pose:
+      state_ee_pose:
         key_type: proprio_keys
         lerobot_key: observations.state.ee_pose
       actions_cartesian:

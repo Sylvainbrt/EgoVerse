@@ -1440,16 +1440,32 @@ class HPT(Algo):
     def _robomimic_to_hpt_data(
         self, batch, cam_keys, proprio_keys, lang_keys, ac_key, aux_ac_keys=[]
     ):
-        """
-        helper method that returns data in the format required for the HPT model
-        """
         data = {}
 
-        # Securely grab joint positions natively
+        # Existing: explicitly handle viperx joint_positions
         if "joint_positions" in batch:
             data["joint_positions"] = batch["joint_positions"].unsqueeze(1)
 
-        # Securely grab ALL available cameras seamlessly (ignores cam_keys lists mismatch)
+        # NEW: generically copy any other proprio-like keys (e.g. state_ee_pose for aria)
+        _handled = {
+            "pad_mask",
+            "embodiment",
+            "action",
+            "actions_joints",
+            "joint_positions",
+            "is_6dof",
+            *aux_ac_keys,
+            ac_key,
+        }
+        for key, val in batch.items():
+            if key in _handled or key in data:
+                continue
+            if "img" in key or "cam" in key:
+                continue  # cameras handled below
+            if isinstance(val, torch.Tensor) and val.is_floating_point():
+                data[key] = val.unsqueeze(1)  # add observation horizon dim
+
+        # Existing camera handling (unchanged)
         for key in list(batch.keys()):
             if "img" in key or "cam" in key:
                 _data = batch[key]

@@ -100,16 +100,33 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         data_schematic.infer_shapes_from_batch(dataset[0])
         # instantiate norm datasets which is same as dataset but with keymap without the image keys
         instantiate_copy = copy.deepcopy(cfg.data.train_datasets[dataset_name])
-        keymap_cfg = instantiate_copy.resolver.key_map
-        km = OmegaConf.to_container(keymap_cfg, resolve=False)  # plain dict
+        # Support both config layouts:
+        #   - old style: resolver.key_map (viperx)
+        #   - new style: key_map directly (aria)
+        if OmegaConf.select(instantiate_copy, "resolver.key_map") is not None:
+            keymap_cfg = instantiate_copy.resolver.key_map
+        elif OmegaConf.select(instantiate_copy, "key_map") is not None:
+            keymap_cfg = instantiate_copy.key_map
+        else:
+            keymap_cfg = OmegaConf.create({})
 
+        km = OmegaConf.to_container(keymap_cfg, resolve=False)
+
+        # Strip camera keys from norm dataset (norm only needs proprio + action)
         km = {
             k: v
             for k, v in km.items()
             if not (isinstance(v, Mapping) and v.get("key_type") == "camera_keys")
+            and not (isinstance(v, str) and ("img" in v or "cam" in v))
         }
 
-        instantiate_copy.resolver.key_map = km
+        # Also remove image keys by name heuristic (they won't be in key_map values
+        # but the keys themselves may reference image columns we want to skip)
+        if OmegaConf.select(instantiate_copy, "resolver.key_map") is not None:
+            instantiate_copy.resolver.key_map = km
+        else:
+            instantiate_copy.key_map = OmegaConf.create(km)
+
         norm_dataset = hydra.utils.instantiate(instantiate_copy)
         data_schematic.infer_norm_from_dataset(
             norm_dataset,

@@ -9,6 +9,8 @@ train_datasets:
     camera_keys:
       - observation.images.front_img_1
       - observation.images.right_wrist_img
+    state_keys:
+      - observation.state         
     resolver:
       key_map:
         observation.images.front_img_1: front_img_1
@@ -23,11 +25,12 @@ train_datasets:
     mode: train
     camera_keys:
       - observations.images.front_img_1
-    resolver:
-      key_map:
-        observations.images.front_img_1: front_img_1
-        actions.cartesian_act: actions_cartesian
-        observations.state.ee_pose: state_ee_pose
+    state_keys:
+      - observations.state.ee_pose               
+    key_map:
+      "observations.images.front_img_1": front_img_1
+      actions_cartesian: actions_cartesian 
+      "observations.state.ee_pose": state_ee_pose
 
 valid_datasets:
   viperx_right_arm:
@@ -38,6 +41,8 @@ valid_datasets:
     camera_keys:
       - observation.images.front_img_1
       - observation.images.right_wrist_img
+    state_keys:
+      - observation.state               
     resolver:
       key_map:
         observation.images.front_img_1: front_img_1
@@ -51,12 +56,13 @@ valid_datasets:
     embodiment: aria_right_arm
     mode: valid
     camera_keys:
-      - observation.images.front_img_1
-    resolver:
-      key_map:
-        observation.images.front_img_1: front_img_1
-        actions.cartesian_act: actions_cartesian
-        observation.state: ee_pose
+      - observations.images.front_img_1
+    state_keys:
+      - observations.state.ee_pose             
+    key_map:
+      "observations.images.front_img_1": front_img_1
+      actions_cartesian: actions_cartesian
+      "observations.state.ee_pose": state_ee_pose
 
 train_dataloader_params:
   viperx_right_arm:

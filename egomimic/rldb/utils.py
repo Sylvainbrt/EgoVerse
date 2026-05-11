@@ -410,28 +410,24 @@ class MultiRLDBDataset(torch.utils.data.Dataset):
         return len(self.index_map)
 
     def _merge_hf_datasets(self):
-        """
-        Merge hf_dataset from multiple RLDBDataset instances while remapping keys.
-
-
-        Returns:
-            A unified Hugging Face Dataset object.
-        """
         dataset_list = []
 
         for dataset_name, sub_dataset in self.datasets.items():
-            hf_dataset = sub_dataset.hf_dataset  # This is a Hugging Face Dataset
+            hf_dataset = sub_dataset.hf_dataset
 
-            # Apply key mapping if available
             if self.key_map and dataset_name in self.key_map:
                 key_map = self.key_map[dataset_name]
-                hf_dataset = hf_dataset.rename_columns(key_map)
+                # Video/image columns don't exist in the HF parquet layer —
+                # they're loaded on-the-fly. Only rename columns that are
+                # actually present to avoid ValueError.
+                existing_cols = set(hf_dataset.column_names)
+                safe_key_map = {k: v for k, v in key_map.items() if k in existing_cols}
+                if safe_key_map:
+                    hf_dataset = hf_dataset.rename_columns(safe_key_map)
 
             dataset_list.append(hf_dataset)
 
-        merged_dataset = concatenate_datasets(dataset_list)
-
-        return merged_dataset
+        return concatenate_datasets(dataset_list)
 
 
 # TODO: add S3 mode where it directly downloads dataset folder from S3
