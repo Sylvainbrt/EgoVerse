@@ -1,0 +1,73 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  # 1. Local LeRobot Format
+  viperx_right_arm:
+    _target_: egomimic.rldb.utils.FolderRLDBDataset
+    folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
+    embodiment: viperx_right_arm
+    mode: train
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.right_wrist_img
+    state_keys:
+      - observation.state
+    resolver:
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.right_wrist_img: right_wrist_img
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+
+  # 2. Remote Zarr Format (AWS/S3)
+  scale_bimanual:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      bucket_name: "rldb"                                           # <--- The AWS bucket
+      folder_path: "/data/sybeuret/.cache/egoverse/scale"           # <--- Local path with write access
+      key_map:
+        _target_: egomimic.rldb.embodiment.human.Scale.get_keymap
+      transform_list:
+        _target_: egomimic.rldb.embodiment.human.Scale.get_transform_list
+    mode: total
+
+valid_datasets:
+  # 1. Local LeRobot Format
+  viperx_right_arm:
+    _target_: egomimic.rldb.utils.FolderRLDBDataset
+    folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
+    embodiment: viperx_right_arm
+    mode: train
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.right_wrist_img
+    state_keys:
+      - observation.state
+    resolver:
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.right_wrist_img: right_wrist_img
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+
+  # 2. Remote Zarr Format (AWS/S3)
+  scale_bimanual:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      bucket_name: "rldb"                                           # <--- The AWS bucket
+      folder_path: "/data/sybeuret/.cache/egoverse/scale"           # <--- Local path with write access
+      key_map:
+        _target_: egomimic.rldb.embodiment.human.Scale.get_keymap
+      transform_list:
+        _target_: egomimic.rldb.embodiment.human.Scale.get_transform_list
+    mode: total
+
+train_dataloader_params:
+  viperx_right_arm:
+    batch_size: 8
+    num_workers: 4
+  scale_bimanual:
+    batch_size: 32     # Larger batch size for the larger dataset
+    num_workers: 10

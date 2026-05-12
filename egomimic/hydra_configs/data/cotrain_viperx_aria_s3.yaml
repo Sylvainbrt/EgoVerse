@@ -1,0 +1,136 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  viperx_right_arm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      folder_path: s3://path_to_your_viperx_s3_bucket/viperx_data # <-- Update S3/remote path here
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.right_wrist_img: right_wrist_img
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+    mode: train
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.right_wrist_img
+    state_keys:
+      - observation.state
+
+  aria_right_arm:
+    _target_: egomimic.rldb.zarr.zarr_datase_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  viperx_right_arm:
+    _target_: egomimic.rldb.utils.S3RLDBDataset
+    s3_path: "s3://egoverse-datasets/lerobot/viperx_right_arm_full"  # Standard EgoVerse viperx path
+    cache_root: "/data/sybeuret/.cache/egoverse"                     # Local folder to passively download into
+    embodiment: viperx_right_arm
+    mode: train
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.right_wrist_img
+    state_keys:
+      - observation.state
+    resolver:
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.right_wrist_img: right_wrist_img
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+
+  aria_right_arm:
+    _target_: egomimic.rldb.utils.S3RLDBDataset
+    bucket_name: "rldb"                                              # Standard EgoVerse rldb bucket
+    cache_root: "/data/sybeuret/.cache/egoverse"                     # Must match the cache directory
+    embodiment: aria_right_arm
+    mode: train
+    camera_keys:
+      - observations.images.front_img_1
+    state_keys:
+      - observations.state.ee_pose
+    resolver:
+      key_map:
+        "observations.images.front_img_1": front_img_1
+        actions_cartesian: actions_cartesian
+        "observations.state.ee_pose": state_ee_pose
+
+# [Duplicate the exact same blocks for valid_datasets with mode: valid]
+
+train_dataloader_params:
+  viperx_right_arm:
+    batch_size: 32
+    num_workers: 10
+  aria_right_arm:
+    batch_size: 32
+    num_workers: 10
+
+valid_dataloader_params:
+  viperx_right_arm:
+    batch_size: 32
+    num_workers: 10
+  aria_right_arm:
+    batch_size: 32
+    num_workers: 10t_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      folder_path: s3://path_to_your_aria_s3_bucket/aria_data # <-- Update S3/remote path here
+      key_map:
+        "observations.images.front_img_1": front_img_1
+        actions_cartesian: actions_cartesian 
+        "observations.state.ee_pose": state_ee_pose
+    mode: train
+    camera_keys:
+      - observations.images.front_img_1
+    state_keys:
+      - observations.state.ee_pose
+
+valid_datasets:
+  viperx_right_arm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      folder_path: s3://path_to_your_viperx_s3_bucket/viperx_data
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.right_wrist_img: right_wrist_img 
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+    mode: valid
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.right_wrist_img
+    state_keys:
+      - observation.state
+
+  aria_right_arm:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      folder_path: s3://path_to_your_aria_s3_bucket/aria_data
+      key_map:
+        "observations.images.front_img_1": front_img_1
+        actions_cartesian: actions_cartesian
+        "observations.state.ee_pose": state_ee_pose
+    mode: valid
+    camera_keys:
+      - observations.images.front_img_1
+    state_keys:
+      - observations.state.ee_pose
+
+train_dataloader_params:
+  viperx_right_arm:
+    batch_size: 32
+    num_workers: 10
+  aria_right_arm:
+    batch_size: 32
+    num_workers: 10
+
+valid_dataloader_params:
+  viperx_right_arm:
+    batch_size: 32
+    num_workers: 10
+  aria_right_arm:
+    batch_size: 32
+    num_workers: 10
