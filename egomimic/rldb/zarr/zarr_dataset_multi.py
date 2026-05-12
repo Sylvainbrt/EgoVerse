@@ -940,7 +940,8 @@ class ZarrEpisode:
 
     @staticmethod
     def _is_remote_path(path: str | Path) -> bool:
-        return str(path).startswith("s3://")
+        parsed = urlparse(str(path))
+        return bool(parsed.scheme and parsed.scheme != "file")
 
     @staticmethod
     def _build_remote_store(path: str):
