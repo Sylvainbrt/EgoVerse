@@ -28,6 +28,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -94,6 +95,36 @@ class EpisodeResolver:
         self.key_map = key_map
         self.transform_list = transform_list
 
+    def _build_zarr_datasets(
+        self, episode_paths: list[tuple[str | Path, str]]
+    ) -> dict[str, "ZarrDataset"]:
+        """
+        Build ZarrDataset objects from explicit (episode_path, episode_hash) tuples.
+
+        Args:
+            episode_paths: List of tuples containing the episode path/URI and hash.
+
+        Returns:
+            dict[str, ZarrDataset]: Mapping from episode hash to dataset object.
+        """
+        datasets: dict[str, ZarrDataset] = {}
+        for episode_path, episode_hash in episode_paths:
+            try:
+                ds_obj = ZarrDataset(
+                    episode_path,
+                    key_map=self.key_map,
+                    transform_list=self.transform_list,
+                )
+                datasets[episode_hash] = ds_obj
+            except Exception as e:
+                logger.error(
+                    "Failed to load dataset for episode %s at %s: %s",
+                    episode_hash,
+                    episode_path,
+                    e,
+                )
+        return datasets
+
     def _load_zarr_datasets(self, search_path: Path, valid_folder_names: set[str]):
         """
         Loads multiple Zarr datasets from the specified folder path, filtering only those whose hashes
@@ -106,8 +137,8 @@ class EpisodeResolver:
             dict[str, ZarrDataset]: a dictionary mapping string keys to constructed zarr datasets from valid filters.
         """
         all_paths = sorted(search_path.iterdir())
-        datasets: dict[str, ZarrDataset] = {}
         skipped: list[str] = []
+        filtered_paths: list[tuple[str | Path, str]] = []
         for p in all_paths:
             if not p.is_dir():
                 logger.info(f"{p} is not a valid directory")
@@ -119,22 +150,29 @@ class EpisodeResolver:
             if name not in valid_folder_names:
                 skipped.append(p.name)
                 continue
-            try:
-                ds_obj = ZarrDataset(
-                    p, key_map=self.key_map, transform_list=self.transform_list
-                )
-                datasets[name] = ds_obj
-            except Exception as e:
-                logger.error(f"Failed to load dataset at {p}: {e}")
-                skipped.append(p.name)
+            filtered_paths.append((p, name))
 
-        return datasets
+        return self._build_zarr_datasets(filtered_paths)
 
     @classmethod
     def _episode_already_present(cls, local_dir: Path, episode_hash: str) -> bool:
         direct = local_dir / episode_hash
         if direct.is_dir():
             return True
+        zarr_dir = local_dir / f"{episode_hash}.zarr"
+        if zarr_dir.is_dir():
+            return True
+        return False
+
+    @classmethod
+    def _local_episode_path(cls, local_dir: Path, episode_hash: str) -> Path:
+        direct = local_dir / episode_hash
+        if direct.is_dir():
+            return direct
+        zarr_dir = local_dir / f"{episode_hash}.zarr"
+        if zarr_dir.is_dir():
+            return zarr_dir
+        return direct
 
 
 class S3EpisodeResolver(EpisodeResolver):
@@ -188,12 +226,21 @@ class S3EpisodeResolver(EpisodeResolver):
                 "filters matched no episodes in the SQL table."
             )
 
-        datasets = self._load_zarr_datasets(
-            search_path=self.folder_path,
-            valid_folder_names=valid_hashes,
+        local_episode_paths = [
+            (self._local_episode_path(self.folder_path, episode_hash), episode_hash)
+            for _, episode_hash in filtered_paths
+        ]
+        datasets = self._build_zarr_datasets(
+            episode_paths=local_episode_paths,
         )
 
         return datasets
+
+    @staticmethod
+    def _normalize_s3_uri(bucket_name: str, processed_path: str) -> str:
+        if processed_path.startswith("s3://"):
+            return processed_path.rstrip("/")
+        return f"s3://{bucket_name}/{processed_path.lstrip('/').rstrip('/')}"
 
     @staticmethod
     def _get_filtered_paths(
@@ -469,11 +516,38 @@ class LocalEpisodeResolver(EpisodeResolver):
                 "filters matched no episodes in the local directory."
             )
 
-        datasets = self._load_zarr_datasets(
-            search_path=self.folder_path, valid_folder_names=valid_folder_names
+        datasets = self._build_zarr_datasets(
+            episode_paths=filtered_paths,
         )
 
         return datasets
+
+
+class S3StreamingEpisodeResolver(S3EpisodeResolver):
+    """
+    Resolves episodes from SQL metadata and reads them directly from S3/R2.
+    """
+
+    def resolve(
+        self,
+        filters: dict | None = None,
+    ) -> dict[str, "ZarrDataset"]:
+        filters = dict(filters) if filters is not None else {}
+        filters["is_deleted"] = False
+
+        logger.info("Streaming S3 datasets with filters: %s", filters)
+        filtered_paths = self._get_filtered_paths(filters, debug=self.debug)
+        if not filtered_paths:
+            raise ValueError(
+                "No valid collection names from _get_filtered_paths: "
+                "filters matched no episodes in the SQL table."
+            )
+
+        remote_episode_paths = [
+            (self._normalize_s3_uri(self.bucket_name, processed_path), episode_hash)
+            for processed_path, episode_hash in filtered_paths
+        ]
+        return self._build_zarr_datasets(remote_episode_paths)
 
 
 class MultiDataset(torch.utils.data.Dataset):
@@ -580,7 +654,7 @@ class ZarrDataset(torch.utils.data.Dataset):
 
     def __init__(
         self,
-        Episode_path: Path,
+        Episode_path: str | Path,
         key_map: dict,
         transform_list: list | None = None,
     ):
@@ -843,6 +917,8 @@ class ZarrEpisode:
     __slots__ = (
         "_path",
         "_store",
+        "_store_opened",
+        "_store_pid",
         "metadata",
         "keys",
     )
@@ -853,10 +929,87 @@ class ZarrEpisode:
         Args:
             path: Path to the .zarr episode directory
         """
-        self._path = Path(path)
-        self._store = zarr.open_group(str(self._path), mode="r")
+        self._path = str(path) if self._is_remote_path(path) else str(Path(path))
+        self._store = None
+        self._store_opened = False
+        self._store_pid = None
+        self.metadata = {}
+        self._ensure_store()
         self.metadata = dict(self._store.attrs)
         self.keys = self.metadata["features"]
+
+    @staticmethod
+    def _is_remote_path(path: str | Path) -> bool:
+        return str(path).startswith("s3://")
+
+    @staticmethod
+    def _build_remote_store(path: str):
+        load_env()
+        endpoint_url = os.environ.get("R2_ENDPOINT_URL")
+        access_key_id = os.environ.get("R2_ACCESS_KEY_ID")
+        secret_access_key = os.environ.get("R2_SECRET_ACCESS_KEY")
+        if not all([endpoint_url, access_key_id, secret_access_key]):
+            raise ValueError(
+                "R2 credentials missing. Ensure ~/.egoverse_env has "
+                "R2_ENDPOINT_URL, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY."
+            )
+
+        try:
+            import s3fs
+        except ImportError as e:
+            raise ImportError(
+                "s3fs is required for direct R2/S3 Zarr streaming."
+            ) from e
+
+        parsed = urlparse(path)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/").rstrip("/")
+        fs = s3fs.S3FileSystem(
+            key=access_key_id,
+            secret=secret_access_key,
+            client_kwargs={
+                "endpoint_url": endpoint_url,
+                "region_name": "auto",
+            },
+        )
+        mapper = fs.get_mapper(f"{bucket}/{key}")
+        fsspec_store_cls = getattr(zarr.storage, "FsspecStore", None)
+        if fsspec_store_cls is None:
+            return mapper
+        if hasattr(fsspec_store_cls, "from_mapper"):
+            return fsspec_store_cls.from_mapper(mapper)
+        return fsspec_store_cls(mapper)
+
+    def _ensure_store(self):
+        current_pid = os.getpid()
+        if self._store_opened and self._store_pid == current_pid:
+            return
+
+        if self._is_remote_path(self._path):
+            store = self._build_remote_store(self._path)
+            self._store = zarr.open_group(store=store, mode="r")
+        else:
+            self._store = zarr.open_group(self._path, mode="r")
+        self._store_opened = True
+        self._store_pid = current_pid
+
+    def __getstate__(self):
+        return {
+            "_path": self._path,
+            "_store": None,
+            "_store_opened": False,
+            "_store_pid": None,
+            "metadata": self.metadata,
+            "keys": self.keys,
+        }
+
+    def __setstate__(self, state):
+        self._path = state["_path"]
+        self._store = None
+        self._store_opened = False
+        self._store_pid = None
+        self.metadata = state["metadata"]
+        self.keys = state["keys"]
 
     def read(
         self, keys_with_ranges: dict[str, tuple[int, int | None]]
@@ -876,6 +1029,7 @@ class ZarrEpisode:
             ...     "rewards": (20, None),     # Read single frame at index 20
             ... })
         """
+        self._ensure_store()
         result = {}
         for key, (start, end) in keys_with_ranges.items():
             arr = self._store[key]

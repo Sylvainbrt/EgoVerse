@@ -32,6 +32,7 @@ argparse
 pandas
 overrides
 zarr==3.1.5
+s3fs==2024.12.0
 tabulate
 transformers==4.57.3
 timm
