@@ -20,17 +20,28 @@ train_datasets:
         observation.state: joint_positions
 
   # 2. Remote Zarr Format (AWS/S3)
-  scale_bimanual:
-    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
-    resolver:
-      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
-      bucket_name: "rldb"                                           # <--- The AWS bucket
-      folder_path: "/data/sybeuret/.cache/egoverse/scale"           # <--- Local path with write access
-      key_map:
-        _target_: egomimic.rldb.embodiment.human.Scale.get_keymap
-      transform_list:
-        _target_: egomimic.rldb.embodiment.human.Scale.get_transform_list
-    mode: total
+    scale_bimanual:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+      resolver:
+        _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3StreamingEpisodeResolver
+        bucket_name: "rldb"
+        folder_path: "/data/sybeuret/tmp/egoverse_unused"
+        max_episodes: 10
+        
+        # Replace the dynamic _target_ keymap with this explicit dictionary:
+        key_map:
+          front_img_1:
+            zarr_key: "observations/images/front_img_1"
+          state_ee_pose:
+            zarr_key: "observations/state/ee_pose"
+          action:
+            zarr_key: "action" 
+            horizon: 100
+        
+        transform_list:
+          _target_: egomimic.rldb.embodiment.human.Scale.get_transform_list
+      filters:
+        robot_name: "scale_bimanual"
 
 valid_datasets:
   # 1. Local LeRobot Format
@@ -52,17 +63,29 @@ valid_datasets:
         observation.state: joint_positions
 
   # 2. Remote Zarr Format (AWS/S3)
-  scale_bimanual:
-    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
-    resolver:
-      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
-      bucket_name: "rldb"                                           # <--- The AWS bucket
-      folder_path: "/data/sybeuret/.cache/egoverse/scale"           # <--- Local path with write access
-      key_map:
-        _target_: egomimic.rldb.embodiment.human.Scale.get_keymap
-      transform_list:
-        _target_: egomimic.rldb.embodiment.human.Scale.get_transform_list
-    mode: total
+    scale_bimanual:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+      resolver:
+        _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3StreamingEpisodeResolver
+        bucket_name: "rldb"
+        folder_path: "/data/sybeuret/tmp/egoverse_unused"
+        max_episodes: 10
+        
+        # Replace the dynamic _target_ keymap with this explicit dictionary:
+        key_map:
+          front_img_1:
+            zarr_key: "observations/images/front_img_1"
+          state_ee_pose:
+            zarr_key: "observations/state/ee_pose"
+          action:
+            zarr_key: "action" 
+            horizon: 100
+        
+        transform_list:
+          _target_: egomimic.rldb.embodiment.human.Scale.get_transform_list
+      filters:
+        robot_name: "scale_bimanual"
+
 
 train_dataloader_params:
   viperx_right_arm:
@@ -71,3 +94,12 @@ train_dataloader_params:
   scale_bimanual:
     batch_size: 32     # Larger batch size for the larger dataset
     num_workers: 10
+  
+valid_dataloader_params:
+  viperx_right_arm:
+    batch_size: 8
+    num_workers: 4
+  scale_bimanual:
+    batch_size: 32
+    num_workers: 10
+

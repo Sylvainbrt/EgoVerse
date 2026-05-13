@@ -107,8 +107,15 @@ class EpisodeResolver:
         Returns:
             dict[str, ZarrDataset]: Mapping from episode hash to dataset object.
         """
+        from tqdm import tqdm
+
         datasets: dict[str, ZarrDataset] = {}
-        for episode_path, episode_hash in episode_paths:
+
+        for episode_path, episode_hash in tqdm(
+            episode_paths,
+            desc="Loading datasets",
+            unit="episode",
+        ):
             try:
                 ds_obj = ZarrDataset(
                     episode_path,
@@ -116,6 +123,7 @@ class EpisodeResolver:
                     transform_list=self.transform_list,
                 )
                 datasets[episode_hash] = ds_obj
+
             except Exception as e:
                 logger.error(
                     "Failed to load dataset for episode %s at %s: %s",
@@ -123,6 +131,7 @@ class EpisodeResolver:
                     episode_path,
                     e,
                 )
+
         return datasets
 
     def _load_zarr_datasets(self, search_path: Path, valid_folder_names: set[str]):
@@ -188,10 +197,12 @@ class S3EpisodeResolver(EpisodeResolver):
         key_map: dict | None = None,
         transform_list: list | None = None,
         debug: bool = False,
+        max_episodes: int | None = None,
     ):
         self.bucket_name = bucket_name
         self.main_prefix = main_prefix
         self.debug = debug
+        self.max_episodes = max_episodes
         super().__init__(folder_path, key_map=key_map, transform_list=transform_list)
 
     def resolve(
@@ -217,6 +228,7 @@ class S3EpisodeResolver(EpisodeResolver):
             filters=filters,
             local_dir=self.folder_path,
             debug=self.debug,
+            max_episodes=self.max_episodes,
         )
 
         valid_hashes = {hashes for _, hashes in filtered_paths}
@@ -244,7 +256,9 @@ class S3EpisodeResolver(EpisodeResolver):
 
     @staticmethod
     def _get_filtered_paths(
-        filters: dict | None = None, debug: bool = False
+        filters: dict | None = None,
+        debug: bool = False,
+        max_episodes: int | None = None,
     ) -> list[tuple[str, str]]:
         """
         Filters episodes from the SQL episode table according to the criteria specified in `filters`
@@ -262,7 +276,7 @@ class S3EpisodeResolver(EpisodeResolver):
         engine = create_default_engine()
         df = episode_table_to_df(engine)
         series = pd.Series(filters)
-
+        print(df["robot_name"].unique())  # add this line temporarily
         output = df.loc[
             (df[list(filters)] == series).all(axis=1),
             ["zarr_processed_path", "episode_hash"],
@@ -279,6 +293,10 @@ class S3EpisodeResolver(EpisodeResolver):
         logger.info(
             f"Skipped {before_len - len(output)} episodes with null zarr_processed_path: {output}"
         )
+
+        if max_episodes is not None and max_episodes > 0:
+            output = output.head(max_episodes)
+            logger.info(f"Limited output to {max_episodes} episodes")
 
         paths = list(output.itertuples(index=False, name=None))
         logger.info(f"Paths: {paths}")
@@ -379,6 +397,7 @@ class S3EpisodeResolver(EpisodeResolver):
         local_dir: Path,
         numworkers: int = 10,
         debug: bool = False,
+        max_episodes=None,
     ):
         """
         Public API:
@@ -394,7 +413,9 @@ class S3EpisodeResolver(EpisodeResolver):
         """
 
         # 1) Resolve episodes from DB
-        filtered_paths = cls._get_filtered_paths(filters, debug=debug)
+        filtered_paths = cls._get_filtered_paths(
+            filters, debug=debug, max_episodes=max_episodes
+        )
         if not filtered_paths:
             logger.warning("No episodes matched filters.")
             return []
@@ -536,7 +557,10 @@ class S3StreamingEpisodeResolver(S3EpisodeResolver):
         filters["is_deleted"] = False
 
         logger.info("Streaming S3 datasets with filters: %s", filters)
-        filtered_paths = self._get_filtered_paths(filters, debug=self.debug)
+        filtered_paths = self._get_filtered_paths(
+            filters, debug=self.debug, max_episodes=self.max_episodes
+        )
+
         if not filtered_paths:
             raise ValueError(
                 "No valid collection names from _get_filtered_paths: "
@@ -604,6 +628,18 @@ class MultiDataset(torch.utils.data.Dataset):
 
         super().__init__()
 
+        raw_embodiment = next(iter(self.datasets.values())).embodiment
+
+        _EMBODIMENT_ALIASES = {
+            "scale": "scale_bimanual",
+            "aria": "aria_bimanual",
+            "eva": "eva_bimanual",
+            "mecka": "mecka_bimanual",
+        }
+        self.embodiment = _EMBODIMENT_ALIASES.get(
+            raw_embodiment.lower(), raw_embodiment
+        )
+
     def __len__(self) -> int:
         return len(self.index_map)
 
@@ -611,9 +647,13 @@ class MultiDataset(torch.utils.data.Dataset):
         dataset_name, local_idx = self.index_map[idx]
         data = self.datasets[dataset_name][local_idx]
 
-        robot_name = self.datasets[dataset_name].embodiment
+        robot_name = self.embodiment  # already normalized by __init__
+
+        from egomimic.rldb.embodiment.embodiment import get_embodiment_id
+
         data["metadata.robot_name"] = robot_name
         data["embodiment"] = robot_name
+        data["metadata.embodiment"] = get_embodiment_id(robot_name.upper())
 
         return data
 
@@ -773,71 +813,17 @@ class ZarrDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         # Build keys_dict with ranges based on whether action chunking is enabled
-        data = {}
-        for k in self.key_map:
-            zarr_key = self.key_map[k]["zarr_key"]
-            horizon = self.key_map[k].get("horizon", None)
-
-            if zarr_key == "annotations":
-                data[k] = self._annotation_text_for_frame(idx)
-                continue
-
-            if horizon is not None:
-                end_idx = min(idx + horizon, self.total_frames)
-                read_interval = (idx, end_idx)
-            else:
-                read_interval = (idx, None)
-            read_dict = {zarr_key: read_interval}
-            raw_data = self.episode_reader.read(read_dict)
-            self._pad_sequences(raw_data, horizon)  # should be able to pad images
-            data[k] = raw_data[zarr_key]
-
-            # Decode JPEG-encoded image data and normalize to [0, 1]
-            # print(f"Print the image_keys: {self._image_keys}")
-            if zarr_key in self._image_keys:
-                jpeg_bytes = data[k]
-                # Decode JPEG bytes to numpy array (H, W, 3)
-                decoded = simplejpeg.decode_jpeg(jpeg_bytes, colorspace="RGB")
-                # data[k] = torch.from_numpy(np.transpose(decoded, (2, 0, 1))).to(torch.float32) / 255.0
-                data[k] = np.transpose(decoded, (2, 0, 1)) / 255.0
-            elif zarr_key in self._json_keys:
-                if isinstance(data[k], np.ndarray):
-                    data[k] = [self._decode_json_entry(v) for v in data[k]]
-                else:
-                    data[k] = self._decode_json_entry(data[k])
-
-        # Convert all numpy arrays in data to torch tensors
-
-        # TODO add the transform list code here
-        if self.transform:
-            for transform in self.transform or []:
-                try:
-                    data = transform.transform(data)
-                except Exception as e:
-                    logger.error(f"Error transforming data: {e}")
-                    logger.error(f"Data: {data}")
-                    logger.error(f"Transform: {transform}")
-                    logger.error(f"Error: {e}")
-                    if idx == 0:
-                        logger.error("Error in first frame")
-                        raise e
-                    else:
-                        return self.__getitem__(0)
-
-        for k, v in data.items():
-            if isinstance(v, np.ndarray):
-                data[k] = torch.from_numpy(v).to(torch.float32)
-
-        return data
+        return self.get_item_keys(idx, keys=None)
 
     def get_item_keys(self, idx: int, keys) -> dict[str, torch.Tensor]:
         requested = self._normalize_keys_arg(keys)
         out = {}
 
+        # Load ALL keys first
         for k in requested:
             if k not in self.key_map:
                 raise KeyError(
-                    f"Unknown key '{k}'. Available keys: {list(self.key_map.keys())}"
+                    f"Unknown key '{k}'. Available: {list(self.key_map.keys())}"
                 )
 
             zarr_key = self.key_map[k]["zarr_key"]
@@ -867,16 +853,26 @@ class ZarrDataset(torch.utils.data.Dataset):
                 else:
                     img = simplejpeg.decode_jpeg(val, colorspace="RGB")
                     val = np.transpose(img, (2, 0, 1)) / 255.0
+                import torchvision.transforms.functional as TF
 
-            out[k] = val
+                val_t = torch.from_numpy(val.copy()).float()
+                if val_t.ndim == 3:
+                    val_t = TF.resize(val_t, [224, 224], antialias=True)
+                elif val_t.ndim == 4:
+                    val_t = torch.stack(
+                        [TF.resize(f, [224, 224], antialias=True) for f in val_t]
+                    )
+                out[k] = val_t
+            else:
+                out[k] = val
 
+        # Apply transforms ONCE, after all keys are loaded
         if self.transform:
             for transform in self.transform or []:
                 try:
                     out = transform.transform(out)
                 except Exception as e:
                     logger.error(f"Error transforming data: {e}")
-                    # NOTE: avoid dumping full arrays into logs
                     logger.error(f"Data keys: {list(out.keys())}")
                     logger.error(f"Transform: {transform}")
                     logger.error(f"Error: {e}")

@@ -7,15 +7,85 @@ robomimic_model:
   ac_keys:
     viperx_right_arm: "actions_joints"
     aria_right_arm: "actions_cartesian"
-  
+    scale_bimanual: "action"     # <-- Match the native dataset action key
+    12: "action"                 # <-- Embodiment ID 12 for Scale
+    15: "actions_joints" 
+
   diffusion: true
   6dof: false
+
+
+  train_image_augs:
+    _target_: torchvision.transforms.Compose
+    transforms:
+    - _target_: torchvision.transforms.Resize
+      size: [224, 224]
+      antialias: true
+    - _target_: torchvision.transforms.ColorJitter
+      brightness: 0.1
+      contrast: 0.1
+      saturation: 0.1
+      hue: 0.05
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+  eval_image_augs:
+    _target_: torchvision.transforms.Compose
+    transforms:
+    - _target_: torchvision.transforms.Resize
+      size: [224, 224]
+      antialias: true
+    - _target_: torchvision.transforms.Normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
 
   stem_specs:
     scale_bimanual:
       state_ee_pose:
         _target_: egomimic.models.hpt_nets.MLPPolicyStem
         input_dim: 12
+        output_dim: 256
+        widths: [256]
+        specs:
+          random_horizon_masking: false
+          cross_attn:
+            crossattn_latent: 16
+            crossattn_heads: 8
+            crossattn_dim_head: 64
+            crossattn_modality_dropout: 0.1
+            modality_embed_dim: 256
+      front_img_1:
+        _target_: egomimic.models.hpt_nets.MLPPolicyStem
+        input_dim: 256
+        output_dim: 256
+        widths: [256]
+        specs:
+          random_horizon_masking: false
+          cross_attn:
+            crossattn_latent: 16
+            crossattn_heads: 8
+            crossattn_dim_head: 64
+            crossattn_modality_dropout: 0.1
+            modality_embed_dim: 256
+
+    viperx_right_arm:
+      right_wrist_img:
+        _target_: egomimic.models.hpt_nets.MLPPolicyStem
+        input_dim: 256
+        output_dim: 256
+        widths: [256]
+        specs:
+          random_horizon_masking: false
+          cross_attn:
+            crossattn_latent: 16
+            crossattn_heads: 8
+            crossattn_dim_head: 64
+            crossattn_modality_dropout: 0.1
+            modality_embed_dim: 256
+      joint_positions:
+        _target_: egomimic.models.hpt_nets.MLPPolicyStem
+        input_dim: 7
         output_dim: 256
         widths: [256]
         specs:
@@ -35,19 +105,38 @@ robomimic_model:
       pooling: null
       time_dist: "beta"
       infer_ac_dims:
-        scale_bimanual: 12
+        scale_bimanual: 14
       model:
         _target_: egomimic.models.denoising_nets.CrossTransformer
         nblocks: 6
         cond_dim: 256
         hidden_dim: 128
-        act_dim: 12
+        act_dim: 14
         act_seq: 100
         n_heads: 4
         dropout: 0.1
         mlp_layers: 4
         mlp_ratio: 4
-        
+    viperx_right_arm:
+      _target_: egomimic.models.fm_policy.FMPolicy
+      action_horizon: 64
+      num_inference_steps: 50
+      pooling: null
+      time_dist: "beta"
+      infer_ac_dims:
+        viperx_right_arm: 7
+      model:
+        _target_: egomimic.models.denoising_nets.CrossTransformer
+        nblocks: 6
+        cond_dim: 256
+        hidden_dim: 128
+        act_dim: 7
+        act_seq: 64
+        n_heads: 4
+        dropout: 0.1
+        mlp_layers: 4
+        mlp_ratio: 4
+
 optimizer:
   _target_: torch.optim.AdamW
   _partial_: true
