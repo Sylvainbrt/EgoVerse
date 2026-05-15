@@ -113,12 +113,21 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         km = OmegaConf.to_container(keymap_cfg, resolve=False)
 
         # Strip camera keys from norm dataset (norm only needs proprio + action)
-        km = {
-            k: v
-            for k, v in km.items()
-            if not (isinstance(v, Mapping) and v.get("key_type") == "camera_keys")
-            and not (isinstance(v, str) and ("img" in v or "cam" in v))
-        }
+        def _looks_like_image_key(key: Any, value: Any) -> bool:
+            candidates = [str(key)]
+            if isinstance(value, Mapping):
+                candidates.extend(str(v) for v in value.values())
+                if value.get("key_type") == "camera_keys":
+                    return True
+            elif isinstance(value, str):
+                candidates.append(value)
+            return any(
+                token in candidate
+                for candidate in candidates
+                for token in ("img", "image", "images", "cam", "camera")
+            )
+
+        km = {k: v for k, v in km.items() if not _looks_like_image_key(k, v)}
 
         # Also remove image keys by name heuristic (they won't be in key_map values
         # but the keys themselves may reference image columns we want to skip)
@@ -132,6 +141,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             norm_dataset,
             dataset_name,
             sample_frac=cfg.norm_stat_fraction,
+            max_samples=cfg.get("norm_stat_max_samples"),
             benchmark_dir=os.path.join(
                 cfg.trainer.default_root_dir, "benchmark_stats.json"
             ),

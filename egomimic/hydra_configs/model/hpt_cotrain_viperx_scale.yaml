@@ -6,10 +6,7 @@ robomimic_model:
   
   ac_keys:
     viperx_right_arm: "actions_joints"
-    aria_right_arm: "actions_cartesian"
-    scale_bimanual: "action"     # <-- Match the native dataset action key
-    12: "action"                 # <-- Embodiment ID 12 for Scale
-    15: "actions_joints" 
+    scale_bimanual: "actions_cartesian"
 
   diffusion: true
   6dof: false
@@ -45,19 +42,6 @@ robomimic_model:
       state_ee_pose:
         _target_: egomimic.models.hpt_nets.MLPPolicyStem
         input_dim: 12
-        output_dim: 256
-        widths: [256]
-        specs:
-          random_horizon_masking: false
-          cross_attn:
-            crossattn_latent: 16
-            crossattn_heads: 8
-            crossattn_dim_head: 64
-            crossattn_modality_dropout: 0.1
-            modality_embed_dim: 256
-      front_img_1:
-        _target_: egomimic.models.hpt_nets.MLPPolicyStem
-        input_dim: 256
         output_dim: 256
         widths: [256]
         specs:
@@ -105,13 +89,13 @@ robomimic_model:
       pooling: null
       time_dist: "beta"
       infer_ac_dims:
-        scale_bimanual: 14
+        scale_bimanual: 12
       model:
         _target_: egomimic.models.denoising_nets.CrossTransformer
         nblocks: 6
         cond_dim: 256
         hidden_dim: 128
-        act_dim: 14
+        act_dim: 12
         act_seq: 100
         n_heads: 4
         dropout: 0.1

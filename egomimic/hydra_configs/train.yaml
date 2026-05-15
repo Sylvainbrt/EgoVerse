@@ -10,7 +10,8 @@ defaults:
   - _self_
 
 seed : 42
-norm_stat_fraction: 1.0 
+norm_stat_fraction: 0.01
+norm_stat_max_samples: 16
 
 name: test
 description: test
@@ -131,10 +132,10 @@ data_schematic: # Dynamically fill in these shapes from the dataset
         lerobot_key: observations.images.front_img_1  # verify with Bug 2 fix
       state_ee_pose:
         key_type: proprio_keys
-        lerobot_key: observations.state.ee_pose       # output of ConcatKeys transform
+        lerobot_key: state_ee_pose
       actions_cartesian:
         key_type: action_keys
-        lerobot_key: actions_cartesian                # output of ConcatKeys transform
+        lerobot_key: actions_cartesian
       embodiment:
         key_type: metadata_keys
         lerobot_key: metadata.embodiment

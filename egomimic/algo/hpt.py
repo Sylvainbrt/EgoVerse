@@ -1052,7 +1052,13 @@ class HPT(Algo):
             ac_key = self.ac_keys[embodiment_id]
             aux_ac_keys = self.auxiliary_ac_keys.get(embodiment_name, [])
             data = self._robomimic_to_hpt_data(
-                _batch, cam_keys, proprio_keys, lang_keys, ac_key, aux_ac_keys
+                _batch,
+                cam_keys,
+                proprio_keys,
+                lang_keys,
+                ac_key,
+                aux_ac_keys,
+                domain_name=embodiment_name,
             )
             hpt_batch = {
                 "domain": embodiment_name,  # readability on config side
@@ -1438,7 +1444,14 @@ class HPT(Algo):
         )
 
     def _robomimic_to_hpt_data(
-        self, batch, cam_keys, proprio_keys, lang_keys, ac_key, aux_ac_keys=[]
+        self,
+        batch,
+        cam_keys,
+        proprio_keys,
+        lang_keys,
+        ac_key,
+        aux_ac_keys=[],
+        domain_name=None,
     ):
         data = {}
 
@@ -1494,11 +1507,14 @@ class HPT(Algo):
             data["action"] = batch.get("actions_joints", batch.get(ac_key))
 
         data["action"] = batch.get("actions_joints", batch.get(ac_key))
-        if (
-            data["action"] is not None
-            and data["action"].shape[1] > self.nets["policy"].action_horizon
-        ):
-            data["action"] = data["action"][:, : self.nets["policy"].action_horizon, :]
+        head = (
+            self.nets["policy"].heads[domain_name]
+            if domain_name in self.nets["policy"].heads
+            else None
+        )
+        action_horizon = getattr(head, "action_horizon", None)
+        if action_horizon is not None and data["action"].shape[1] > action_horizon:
+            data["action"] = data["action"][:, :action_horizon, :]
 
         return data
 

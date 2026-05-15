@@ -1097,9 +1097,16 @@ class DataSchematic(object):
                 shape = (1,)
             else:
                 shape = None
-            key = self.lerobot_key_to_keyname(key, embodiment_id)
+            batch_key = key
+            key = self.lerobot_key_to_keyname(batch_key, embodiment_id)
+            if key is None and batch_key in self.df["key_name"].values:
+                key = batch_key
             if key in self.df["key_name"].values:
-                self.df.loc[self.df["key_name"] == key, "shape"] = str(shape)
+                self.df.loc[
+                    (self.df["key_name"] == key)
+                    & (self.df["embodiment"] == embodiment_id),
+                    "shape",
+                ] = str(shape)
 
         self.shapes_infered = True
 
@@ -1120,7 +1127,7 @@ class DataSchematic(object):
             f"{len(norm_columns)} columns"
         )
 
-        for column in norm_columns:
+        for column in dict.fromkeys(norm_columns):
             if not self.is_key_with_embodiment(column, embodiment):
                 continue
             column_name = self.keyname_to_lerobot_key(column, embodiment)
@@ -1161,6 +1168,7 @@ class DataSchematic(object):
         dataset,
         dataset_name,
         sample_frac: float = 1.0,
+        max_samples: int | None = None,
         benchmark_dir: str | None = None,
     ):
         """
@@ -1207,13 +1215,43 @@ class DataSchematic(object):
                     return None
             return None
 
-        for column in norm_columns:
+        def get_transformed_data(ds, col):
+            if not hasattr(ds, "__getitem__") or not hasattr(ds, "__len__"):
+                return None
+            n_total = len(ds)
+            if n_total <= 0:
+                return None
+            n_samples = max(1, int(np.ceil(sample_frac * n_total)))
+            transformed_max_samples = (
+                max_samples
+                if max_samples is not None
+                else int(os.environ.get("EGOMIMIC_TRANSFORM_NORM_MAX_SAMPLES", "4096"))
+            )
+            n_samples = min(n_samples, n_total, transformed_max_samples)
+            rng = random.Random(42)
+            indices = rng.sample(range(n_total), n_samples)
+            values = []
+            for idx in tqdm(indices, desc=f"[NormStats] transformed {col}"):
+                sample = ds[idx]
+                if col not in sample:
+                    continue
+                value = sample[col]
+                if hasattr(value, "detach"):
+                    value = value.detach().cpu().numpy()
+                values.append(np.asarray(value))
+            if not values:
+                return None
+            return np.stack(values, axis=0)
+
+        for column in dict.fromkeys(norm_columns):
             if not self.is_key_with_embodiment(column, embodiment):
                 continue
             column_name = self.keyname_to_lerobot_key(column, embodiment)
             logger.info(f"[NormStats] Processing column={column_name}")
 
             column_data = get_zarr_data(dataset, column_name)
+            if column_data is None:
+                column_data = get_transformed_data(dataset, column)
 
             if column_data is None:
                 logger.warning(

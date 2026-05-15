@@ -3,9 +3,13 @@
 ## Overview
 
 Adapting a ViperX robot arm setup (recorded via LeRobot) to train with
-EgoVerse.  
-EgoVerse supports two training pipelines; we use the **LeRobot
-pipeline** (not Zarr).
+EgoVerse.
+
+The current setup supports:
+
+- ViperX local LeRobot training via `FolderRLDBDataset`.
+- ViperX + Scale co-training, where ViperX is local LeRobot data and Scale is
+  remote or locally cached Zarr data.
 
 ---
 
@@ -16,6 +20,16 @@ pipeline** (not Zarr).
     EgoVerse training (parquet + mp4, 9 DoF -> 7 DoF)
         ↓ (convert + add columns)
     FolderRLDBDataset
+
+For Scale co-training:
+
+    Scale Zarr episodes
+        ↓ (S3StreamingEpisodeResolver or S3EpisodeResolver)
+    ZarrDataset + Scale transform pipeline
+        ↓
+    front_img_1, state_ee_pose, actions_cartesian
+        ↓
+    MultiDataModuleWrapper with ViperX batches
 
 ---
 
@@ -48,6 +62,10 @@ Original recorded dataset at:
 ### 3. HPT Hydra Configs
 - **`hydra_configs/model/hpt_bc_flow_viperx.yaml`**: Defined encoder/stem structures matching 7-DoF inputs and empty `camera_transforms`.
 - **`hydra_configs/train.yaml`**: Updated `DataSchematic` and dataset paths to map LeRobot raw names to EgoVerse model names dynamically.
+- **`hydra_configs/data/cotrain_viperx_scale.yaml`**: Adds ViperX + Scale co-training. ViperX is read from local LeRobot data and Scale is read from Zarr episodes.
+- **`hydra_configs/model/hpt_cotrain_viperx_scale.yaml`**: Adds separate action heads for ViperX joint actions and Scale Cartesian actions while sharing the front camera representation.
+- **`egomimic/algo/hpt.py`**: Supports per-domain action horizons so ViperX can use 64-step joint chunks and Scale can use 100-step Cartesian chunks in the same run.
+- **`egomimic/rldb/utils.py`**: Supports normalization statistics for transformed Zarr outputs such as Scale `state_ee_pose` and `actions_cartesian`.
 
 ---
 
@@ -140,6 +158,86 @@ python egomimic/trainHydra.py \
   trainer=ddp
 ```
 
+## Option C: Co-Training ViperX With Scale
+
+```bash
+python egomimic/trainHydra.py \
+  --config-name=train \
+  data=cotrain_viperx_scale \
+  model=hpt_cotrain_viperx_scale \
+  logger=wandb \
+  trainer=ddp \
+  trainer.strategy=ddp_find_unused_parameters_true
+```
+
+This run uses two datasets at each training step:
+
+- `viperx_right_arm`: local LeRobot data, action key `actions_joints`, shape `(64, 7)`.
+- `scale_bimanual`: Scale Zarr data, action key `actions_cartesian`, shape `(100, 12)`.
+
+The Scale raw Zarr episodes do not store `actions_cartesian` directly. They store:
+
+- `images.front_1`
+- `left.obs_ee_pose`
+- `right.obs_ee_pose`
+- `obs_head_pose`
+
+The config uses `_build_aria_bimanual_transform_list` with `stride: 1` to produce:
+
+- `front_img_1`
+- `state_ee_pose`
+- `actions_cartesian`
+
+### Scale Dataset Source Modes
+
+For direct remote streaming, use:
+
+```yaml
+resolver:
+  _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3StreamingEpisodeResolver
+  bucket_name: rldb
+  folder_path: /data/sybeuret/tmp/egoverse_unused
+  max_episodes: 100
+```
+
+For local caching of a subset, use:
+
+```yaml
+resolver:
+  _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+  bucket_name: rldb
+  folder_path: /data/sybeuret/scale_zarr_cache
+  max_episodes: 50
+```
+
+`S3EpisodeResolver` downloads selected episodes into `folder_path` and skips
+episodes that are already present on later runs. This is recommended when S3
+streaming produces bursty GPU utilization.
+
+Check cache size with:
+
+```bash
+du -sh /data/sybeuret/scale_zarr_cache
+```
+
+### Normalization Settings
+
+`train.yaml` controls normalization sampling:
+
+```yaml
+norm_stat_fraction: 0.01
+norm_stat_max_samples: 512
+```
+
+`norm_stat_fraction` is the fraction of the frame-level dataset to sample.
+`norm_stat_max_samples` is a hard cap on the total sampled frames per transformed
+key, not per episode. For Scale, the transformed keys are currently
+`state_ee_pose` and `actions_cartesian`.
+
+When debugging, use a smaller cap such as `128` or `256`. Once training works,
+increase `max_episodes` for more data diversity while keeping
+`norm_stat_max_samples` capped to avoid long startup times.
+
 ### Rollout / Inference
 
 Once your model has trained (check logs/checkpoints/ for .ckpt files), you can run inference directly on the ViperX using the wrapper built on LeRobot. Ensure the robot workspace is clear and Aria glasses are connected.
@@ -163,6 +261,9 @@ If you encounter errors during initialization, verify the following:
 - Missing camera_transforms in YAML: Ensure camera_transforms: {} exists in hpt_bc_flow_viperx.yaml.
 - keys_of_type Argument Error: The HPT.__init__ in egomimic/algo/hpt.py may be explicitly passing the embodiment_id flag. Verify that the line data_schematic.keys_of_type("action_keys") matches the signature in rldb/utils.py.
 - "Data not found" during NormStats inference: If debug logs report Skipping observation.state, double check string names. Note the difference between observation.(...) (singular) and observations.(...) (plural) in your YAML files versus info.json.
+- Slow `[NormStats] transformed ...`: Scale `state_ee_pose` and `actions_cartesian` are created by transforms, so norm statistics must sample frames and run the transform pipeline. Reduce `norm_stat_max_samples` for debugging.
+- Bursty training throughput: Remote Scale streaming reads from S3 in DataLoader workers. If CPU/network/GPU usage comes in peaks, cache a subset locally with `S3EpisodeResolver`, reduce Scale batch size, and use `persistent_workers`, `prefetch_factor`, and `pin_memory`.
+- Shape error in Scale action loss: Ensure Scale action heads use `action_horizon: 100`, `act_dim: 12`, and `ac_keys.scale_bimanual: actions_cartesian`. HPT should use per-domain head horizons, not the shared trunk horizon, when slicing actions.
 - LeRobot Driver Issues during Rollout: If ViperXInterface fails to connect, ensure no other python scripts are grabbing the camera feed or serial ports simultaneously.
 
 ---
@@ -172,5 +273,6 @@ If you encounter errors during initialization, verify the following:
 EgoVerse is designed to scale dynamically across diverse datasets and embodiments. Once your local single-robot training works, you can expand your configurations:
 
 1. **Multi-Robot Co-Training (Local)**: Train ViperX and Aria (or other arms) simultaneously. Create a `cotrain_viperx_aria.yaml` that feeds both local datasets into a shared Heterogeneous Pretrained Transformer (HPT) trunk using separate diffusion heads for joint space (ViperX) and Cartesian space (Aria).
-2. **Full Dataset Scale (S3/Cluster)**: Use `S3RLDBDataset` instead of `FolderRLDBDataset`. Point your dataloader directly to remote storage locations to leverage thousands of episodes across unified visual trunks via `scale.yaml`. You will need to increase compute (DDP across multiple GPUs) and your batch size.
-3. **Action-Free Human Co-Training**: Use Ego4D and Project Aria human demonstration datasets (`human_hands` embodiment) to heavily pre-train the model's visual trunk. The human data (which lacks explicit robot actions) improves visual representation learning, while your ViperX data fine-tunes the action-decoding head. 
+2. **ViperX + Scale Co-Training**: Use `cotrain_viperx_scale.yaml` with a shared visual trunk, a ViperX 7-DoF joint head, and a Scale 12-DoF Cartesian head. Start with `max_episodes: 50` or `100`, then increase after throughput and loss curves look healthy.
+3. **Full Dataset Scale (S3/Cluster)**: Use S3/Zarr resolvers to leverage thousands of episodes across unified visual trunks. For single-machine experiments, prefer a local cache subset if disk space allows. For full remote streaming, expect to need more CPU/network bandwidth and multiple GPUs.
+4. **Action-Free Human Co-Training**: Use Ego4D and Project Aria human demonstration datasets (`human_hands` embodiment) to heavily pre-train the model's visual trunk. The human data (which lacks explicit robot actions) improves visual representation learning, while your ViperX data fine-tunes the action-decoding head.
