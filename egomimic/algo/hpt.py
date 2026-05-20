@@ -1107,7 +1107,13 @@ class HPT(Algo):
             ac_key = self.ac_keys[embodiment_id]
             aux_ac_keys = self.auxiliary_ac_keys.get(embodiment_name, [])
             data = self._robomimic_to_hpt_data(
-                _batch, cam_keys, proprio_keys, lang_keys, ac_key, aux_ac_keys
+                _batch,
+                cam_keys,
+                proprio_keys,
+                lang_keys,
+                ac_key,
+                aux_ac_keys,
+                domain_name=embodiment_name,
             )
             hpt_batch = {
                 "domain": embodiment_name,  # readability on config side
@@ -1134,6 +1140,8 @@ class HPT(Algo):
                     name = key
 
                 B, T, D = ref.shape
+                T = min(T, pred.shape[1])
+                D = min(D, pred.shape[2])
                 pred = pred[:, :T, :D]
                 predictions[name] = pred
 
@@ -1144,6 +1152,12 @@ class HPT(Algo):
                 unnorm_preds[f"{embodiment_name}_{key}"] = unnorm_actions[key]
 
         return unnorm_preds
+
+    def _align_prediction_and_target(self, pred, target):
+        """Return tensors cropped to their common temporal and action dimensions."""
+        T = min(pred.shape[1], target.shape[1])
+        D = min(pred.shape[2], target.shape[2])
+        return pred[:, :T, :D], target[:, :T, :D]
 
     @override
     def forward_eval_logging(self, batch):
@@ -1166,16 +1180,17 @@ class HPT(Algo):
             embodiment_name = get_embodiment(embodiment_id).lower()
             ac_key = self.ac_keys[embodiment_id]
             if f"{embodiment_name}_{ac_key}" in preds and ac_key != self.shared_ac_key:
-                metrics[f"Valid/{embodiment_name}_{ac_key}_paired_mse_avg"] = mse(
-                    (preds[f"{embodiment_name}_{ac_key}"]).cpu(), _batch[ac_key].cpu()
-                )
-                metrics[f"Valid/{embodiment_name}_{ac_key}_final_mse_avg"] = mse(
-                    (preds[f"{embodiment_name}_{ac_key}"][:, -1]).cpu(),
-                    _batch[ac_key][:, -1].cpu(),
-                )
-                fd = frechet_gaussian_over_time(
+                pred, target = self._align_prediction_and_target(
                     preds[f"{embodiment_name}_{ac_key}"], _batch[ac_key]
                 )
+                metrics[f"Valid/{embodiment_name}_{ac_key}_paired_mse_avg"] = mse(
+                    pred.cpu(), target.cpu()
+                )
+                metrics[f"Valid/{embodiment_name}_{ac_key}_final_mse_avg"] = mse(
+                    pred[:, -1].cpu(),
+                    target[:, -1].cpu(),
+                )
+                fd = frechet_gaussian_over_time(pred, target)
                 metrics[f"Valid/{embodiment_name}_{ac_key}_frechet_gauss_avg"] = (
                     fd.mean().item()
                 )
@@ -1190,15 +1205,16 @@ class HPT(Algo):
                 for aux_key in self.auxiliary_ac_keys[embodiment_name]:
                     pred_key = f"{embodiment_name}_{aux_key}"
                     if pred_key in preds:
-                        metrics[f"Valid/{pred_key}_paired_mse_avg"] = mse(
-                            preds[pred_key].cpu(), _batch[aux_key].cpu()
-                        )
-                        metrics[f"Valid/{pred_key}_final_mse_avg"] = mse(
-                            preds[pred_key][:, -1].cpu(), _batch[aux_key][:, -1].cpu()
-                        )
-                        fd = frechet_gaussian_over_time(
+                        pred, target = self._align_prediction_and_target(
                             preds[pred_key], _batch[aux_key]
                         )
+                        metrics[f"Valid/{pred_key}_paired_mse_avg"] = mse(
+                            pred.cpu(), target.cpu()
+                        )
+                        metrics[f"Valid/{pred_key}_final_mse_avg"] = mse(
+                            pred[:, -1].cpu(), target[:, -1].cpu()
+                        )
+                        fd = frechet_gaussian_over_time(pred, target)
                         metrics[f"Valid/{pred_key}_frechet_gauss_avg"] = (
                             fd.mean().item()
                         )
@@ -1210,16 +1226,17 @@ class HPT(Algo):
                 and f"{embodiment_name}_{self.shared_ac_key}" in preds
             ):
                 pred_key = f"{embodiment_name}_{self.shared_ac_key}"
-                metrics[f"Valid/{pred_key}_paired_mse_avg"] = mse(
-                    preds[pred_key].cpu(), _batch[self.shared_ac_key].cpu()
-                )
-                metrics[f"Valid/{pred_key}_final_mse_avg"] = mse(
-                    preds[pred_key][:, -1].cpu(),
-                    _batch[self.shared_ac_key][:, -1].cpu(),
-                )
-                fd = frechet_gaussian_over_time(
+                pred, target = self._align_prediction_and_target(
                     preds[pred_key], _batch[self.shared_ac_key]
                 )
+                metrics[f"Valid/{pred_key}_paired_mse_avg"] = mse(
+                    pred.cpu(), target.cpu()
+                )
+                metrics[f"Valid/{pred_key}_final_mse_avg"] = mse(
+                    pred[:, -1].cpu(),
+                    target[:, -1].cpu(),
+                )
+                fd = frechet_gaussian_over_time(pred, target)
                 metrics[f"Valid/{pred_key}_frechet_gauss_avg"] = fd.mean().item()
                 metrics[f"Valid/{pred_key}_frechet_gauss_min"] = fd.min().item()
                 metrics[f"Valid/{pred_key}_frechet_gauss_max"] = fd.max().item()
@@ -1242,10 +1259,13 @@ class HPT(Algo):
                     f"{embodiment_name}_{ac_key}" in preds
                     and ac_key != self.shared_ac_key
                 ):
+                    _, target = self._align_prediction_and_target(
+                        preds[f"{embodiment_name}_{ac_key}"], _batch[ac_key]
+                    )
                     rkl_targets.append(
                         (
                             f"{embodiment_name}_{ac_key}",
-                            _batch[ac_key].to(self.device),
+                            target.to(self.device),
                             embodiment_name,
                         )
                     )
@@ -1254,17 +1274,23 @@ class HPT(Algo):
                     for aux_key in self.auxiliary_ac_keys[embodiment_name]:
                         aux_pred_key = f"{embodiment_name}_{aux_key}"
                         if aux_pred_key in preds:
+                            _, target = self._align_prediction_and_target(
+                                preds[aux_pred_key], _batch[aux_key]
+                            )
                             rkl_targets.append(
-                                (aux_pred_key, _batch[aux_key].to(self.device), aux_key)
+                                (aux_pred_key, target.to(self.device), aux_key)
                             )
 
                 if self.shared_ac_key:
                     shared_pred_key = f"{embodiment_name}_{self.shared_ac_key}"
                     if shared_pred_key in preds:
+                        _, target = self._align_prediction_and_target(
+                            preds[shared_pred_key], _batch[self.shared_ac_key]
+                        )
                         rkl_targets.append(
                             (
                                 shared_pred_key,
-                                _batch[self.shared_ac_key].to(self.device),
+                                target.to(self.device),
                                 "shared",
                             )
                         )
@@ -1300,6 +1326,10 @@ class HPT(Algo):
         ims = (batch[viz_img_key].cpu().numpy().transpose((0, 2, 3, 1)) * 255).astype(
             np.uint8
         )
+        if embodiment_name not in self.camera_transforms:
+            return ims
+
+        camera_transform = self.camera_transforms[embodiment_name]
         for key in batch:
             if f"{embodiment_name}_{key}" in predictions:
                 preds = predictions[f"{embodiment_name}_{key}"]
@@ -1315,9 +1345,7 @@ class HPT(Algo):
                     elif preds.shape[-1] == 3 or preds.shape[-1] == 6:
                         ac_type = "xyz"
                     else:
-                        raise ValueError(
-                            f"Unknown action type with shape {preds.shape}"
-                        )
+                        continue
 
                     # Determine arm from embodiment name, not action shape
                     if "bimanual" in embodiment_name:
@@ -1333,8 +1361,8 @@ class HPT(Algo):
                         ac_type,
                         "Purples",
                         preds[b].cpu().numpy(),
-                        self.camera_transforms[embodiment_name].extrinsics,
-                        self.camera_transforms[embodiment_name].intrinsics,
+                        camera_transform.extrinsics,
+                        camera_transform.intrinsics,
                         arm=arm,
                         kinematics_solver=self.kinematics_solver,
                     )
@@ -1343,8 +1371,8 @@ class HPT(Algo):
                         ac_type,
                         "Greens",
                         gt[b].cpu().numpy(),
-                        self.camera_transforms[embodiment_name].extrinsics,
-                        self.camera_transforms[embodiment_name].intrinsics,
+                        camera_transform.extrinsics,
+                        camera_transform.intrinsics,
                         arm=arm,
                         kinematics_solver=self.kinematics_solver,
                     )

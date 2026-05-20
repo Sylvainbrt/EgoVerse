@@ -240,19 +240,71 @@ increase `max_episodes` for more data diversity while keeping
 
 ### Rollout / Inference
 
-Once your model has trained (check logs/checkpoints/ for .ckpt files), you can run inference directly on the ViperX using the wrapper built on LeRobot. Ensure the robot workspace is clear and Aria glasses are connected.
+Once your model has trained (check `logs/.../checkpoints/` for `.ckpt`
+files), use the LeRobot-side EgoVerse inference entry point. This is preferred
+over the older `egomimic/robot/viperx/viperx_rollout.py` sketch because it
+reuses the working LeRobot ViperX connection, camera parsing, chunked inference,
+and 7D model-output to 9D hardware-action mapping.
+
+LeRobot files:
+
+- `/data/sybeuret/codes/lerobot/src/lerobot/scripts/egoverse_adapter.py`
+- `/data/sybeuret/codes/lerobot/src/lerobot/scripts/lerobot_egoverse_inference.py`
+- `/data/sybeuret/codes/lerobot/egoverse.md`
+
+Always start in dry mode. Dry mode connects to the robot and cameras, runs model
+inference, and prints the command that would be sent without calling
+`robot.send_action`.
 
 ```bash
-python egomimic/robot/viperx/viperx_rollout.py \
-  --policy-path /path/to/your/checkpoint/last.ckpt \
-  --frequency 30 \
-  --query_frequency 30
+cd /data/sybeuret/codes/lerobot
+conda activate egoverse
+
+EGOVERSE_ROOT=/data/sybeuret/codes/EgoVerse \
+python src/lerobot/scripts/lerobot_egoverse_inference.py \
+  --ckpt_path /path/to/EgoVerse/logs/.../checkpoints/last.ckpt \
+  --robot.type=viperx \
+  --robot.port=/dev/ttyDXL_follower_left \
+  --robot.id=left_follower \
+  --robot.calibration_dir=/data/sybeuret/codes/lerobot/config/viperx-robot \
+  --robot.max_relative_target=5.0 \
+  --robot.cameras='{
+    "front_img_1": {
+      "type": "aria",
+      "streaming_interface": "usb",
+      "warmup_s": 5.0,
+      "fps": 30,
+      "width": 640,
+      "height": 480
+    },
+    "right_wrist_img": {
+      "type": "intelrealsense",
+      "serial_number_or_name": "218622276584",
+      "color_mode": "RGB",
+      "use_depth": true,
+      "rotation": 0,
+      "warmup_s": 5,
+      "fps": 30,
+      "width": 640,
+      "height": 480
+    }
+  }' \
+  --fps 30 \
+  --query_frequency 30 \
+  --debug \
+  --max_steps 200
 ```
 
-## Rollout Controls:
+After the dry run shows plausible action chunks and command values, enable live
+commands explicitly:
 
-- q : Quit safely and stop inference.
-- r : Restart rollout state (Clears action chunking buffers).
+```bash
+# Same command as above, plus:
+--send_actions
+```
+
+Use `--home` only when you want the script to move to the hard-coded home pose
+before live inference. Use `--max_steps 0` to run until Ctrl+C.
 
 ### Next steps / Troubleshooting
 

@@ -166,10 +166,10 @@ class EpisodeResolver:
     @classmethod
     def _episode_already_present(cls, local_dir: Path, episode_hash: str) -> bool:
         direct = local_dir / episode_hash
-        if direct.is_dir():
+        if direct.is_dir() and (direct / "zarr.json").is_file():
             return True
         zarr_dir = local_dir / f"{episode_hash}.zarr"
-        if zarr_dir.is_dir():
+        if zarr_dir.is_dir() and (zarr_dir / "zarr.json").is_file():
             return True
         return False
 

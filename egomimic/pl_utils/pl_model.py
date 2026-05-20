@@ -146,7 +146,11 @@ class ModelWrapper(LightningModule):
         """
         Run a validation step on the batch, and save that batch of images into the val_image_buffer.  Once the buffer hits 1000 images, save that as a 30fps video using torchvision.io.write_video.
         """
-        print(f"[VAL_STEP] rank={self.global_rank}, batch_idx={batch_idx}", flush=True)
+        if batch_idx < 5 or batch_idx % 50 == 0:
+            print(
+                f"[VAL_STEP] rank={self.global_rank}, batch_idx={batch_idx}",
+                flush=True,
+            )
 
         batch = self.model.process_batch_for_training(batch)
         metrics, images_dict = self.model.forward_eval_logging(batch)

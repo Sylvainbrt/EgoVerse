@@ -59,12 +59,16 @@ class MultiDataModuleWrapper(LightningDataModule):
         collate_max_length=128,
         model_name="google/paligemma-3b-mix-224",
         use_tokenizer=False,
+        train_combined_mode="max_size_cycle",
+        val_combined_mode="min_size",
     ):
         super().__init__()
         self.train_datasets = train_datasets
         self.valid_datasets = valid_datasets
         self.train_dataloader_params = train_dataloader_params
         self.valid_dataloader_params = valid_dataloader_params
+        self.train_combined_mode = train_combined_mode
+        self.val_combined_mode = val_combined_mode
         if use_tokenizer:
             self.collate_fn = build_tokenized_collate(
                 max_length=collate_max_length,
@@ -88,7 +92,7 @@ class MultiDataModuleWrapper(LightningDataModule):
                 **dataset_params,
             )
 
-        return CombinedLoader(iterables, "max_size_cycle")
+        return CombinedLoader(iterables, self.train_combined_mode)
 
     def val_dataloader(self):
         iterables = dict()
@@ -105,7 +109,7 @@ class MultiDataModuleWrapper(LightningDataModule):
                 **dataset_params,
             )
 
-        return CombinedLoader(iterables, "max_size_cycle")
+        return CombinedLoader(iterables, self.val_combined_mode)
 
 
 class DualDataModuleWrapper(LightningDataModule):

@@ -11,7 +11,10 @@ defaults:
 
 seed : 42
 norm_stat_fraction: 0.01
-norm_stat_max_samples: 16
+norm_stat_max_samples: 512
+
+gradient_clip_val: 10.0
+gradient_clip_algorithm: norm
 
 name: test
 description: test

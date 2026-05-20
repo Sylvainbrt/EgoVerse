@@ -1395,17 +1395,29 @@ class DataSchematic(object):
 
                 stats = self.norm_stats[embodiment][key]
                 if self.norm_mode == "zscore":
-                    mean = stats["mean"].to(tensor.device)
-                    std = stats["std"].to(tensor.device)
+                    mean = self._align_stats_to_tensor(
+                        stats["mean"].to(tensor.device), tensor
+                    )
+                    std = self._align_stats_to_tensor(
+                        stats["std"].to(tensor.device), tensor
+                    )
                     norm_data[key] = (tensor - mean) / (std + 1e-6)
                 elif self.norm_mode == "minmax":
-                    min = stats["min"].to(tensor.device)
-                    max = stats["max"].to(tensor.device)
+                    min = self._align_stats_to_tensor(
+                        stats["min"].to(tensor.device), tensor
+                    )
+                    max = self._align_stats_to_tensor(
+                        stats["max"].to(tensor.device), tensor
+                    )
                     ndata = (tensor - min) / (max - min + 1e-6)
                     norm_data[key] = 2.0 * ndata - 1.0
                 elif self.norm_mode == "quantile":
-                    quantile_1 = stats["quantile_1"].to(tensor.device)
-                    quantile_99 = stats["quantile_99"].to(tensor.device)
+                    quantile_1 = self._align_stats_to_tensor(
+                        stats["quantile_1"].to(tensor.device), tensor
+                    )
+                    quantile_99 = self._align_stats_to_tensor(
+                        stats["quantile_99"].to(tensor.device), tensor
+                    )
                     ndata = (tensor - quantile_1) / (quantile_99 - quantile_1 + 1e-6)
                     norm_data[key] = 2.0 * ndata - 1.0
                 else:
@@ -1414,6 +1426,20 @@ class DataSchematic(object):
                 norm_data[key] = tensor
 
         return norm_data
+
+    def _align_stats_to_tensor(self, stats_tensor, tensor):
+        """Slice temporal/dimensional norm stats to match a prediction tensor."""
+        if stats_tensor.ndim == 0:
+            return stats_tensor
+        offset = max(0, tensor.ndim - stats_tensor.ndim)
+        slices = []
+        for dim, size in enumerate(stats_tensor.shape):
+            tensor_dim = dim + offset
+            if tensor_dim < tensor.ndim and size != tensor.shape[tensor_dim]:
+                slices.append(slice(0, min(size, tensor.shape[tensor_dim])))
+            else:
+                slices.append(slice(None))
+        return stats_tensor[tuple(slices)]
 
     def unnormalize_data(self, data, embodiment):
         """
@@ -1449,20 +1475,32 @@ class DataSchematic(object):
 
                 stats = self.norm_stats[embodiment][key]
                 if self.norm_mode == "zscore":
-                    mean = stats["mean"].to(tensor.device)
-                    std = stats["std"].to(tensor.device)
+                    mean = self._align_stats_to_tensor(
+                        stats["mean"].to(tensor.device), tensor
+                    )
+                    std = self._align_stats_to_tensor(
+                        stats["std"].to(tensor.device), tensor
+                    )
                     denorm_data[key] = tensor * (std + 1e-6) + mean
 
                 elif self.norm_mode == "minmax":
-                    min_val = stats["min"].to(tensor.device)
-                    max_val = stats["max"].to(tensor.device)
+                    min_val = self._align_stats_to_tensor(
+                        stats["min"].to(tensor.device), tensor
+                    )
+                    max_val = self._align_stats_to_tensor(
+                        stats["max"].to(tensor.device), tensor
+                    )
                     denorm_data[key] = (tensor + 1) * 0.5 * (
                         max_val - min_val + 1e-6
                     ) + min_val
 
                 elif self.norm_mode == "quantile":
-                    quantile_1 = stats["quantile_1"].to(tensor.device)
-                    quantile_99 = stats["quantile_99"].to(tensor.device)
+                    quantile_1 = self._align_stats_to_tensor(
+                        stats["quantile_1"].to(tensor.device), tensor
+                    )
+                    quantile_99 = self._align_stats_to_tensor(
+                        stats["quantile_99"].to(tensor.device), tensor
+                    )
                     denorm_data[key] = (tensor + 1) * 0.5 * (
                         quantile_99 - quantile_1 + 1e-6
                     ) + quantile_1
