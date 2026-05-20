@@ -52,9 +52,94 @@ class ModelWrapper(LightningModule):
     def video_dir(self):
         return os.path.join(self.root_dir(), "videos")
 
+    def _debug_spike_threshold(self):
+        value = os.environ.get("EGOVERSE_DEBUG_LOSS_THRESHOLD")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            if self.trainer.is_global_zero:
+                print(
+                    f"[LOSS_SPIKE_DEBUG] invalid EGOVERSE_DEBUG_LOSS_THRESHOLD={value!r}",
+                    flush=True,
+                )
+            return None
+
+    def _summarize_batch_sources(self, raw_batch):
+        summary = {}
+        for embodiment_name, domain_batch in raw_batch.items():
+            domain_summary = {}
+            for key in (
+                "metadata.episode_hash",
+                "metadata.frame_idx",
+                "episode_index",
+                "frame_index",
+                "index",
+            ):
+                if key not in domain_batch:
+                    continue
+                value = domain_batch[key]
+                if isinstance(value, torch.Tensor):
+                    value = value.detach().cpu().tolist()
+                elif isinstance(value, tuple):
+                    value = list(value)
+                domain_summary[key] = value
+            for key in ("actions_cartesian", "actions_joints", "action"):
+                if key not in domain_batch or not isinstance(
+                    domain_batch[key], torch.Tensor
+                ):
+                    continue
+                value = domain_batch[key].detach().float().cpu()
+                flat = value.reshape(value.shape[0], -1)
+                finite = torch.isfinite(flat).all(dim=1)
+                max_abs = flat.abs().amax(dim=1)
+                rms = torch.sqrt(torch.mean(flat.square(), dim=1))
+                k = min(5, len(max_abs))
+                top = torch.topk(max_abs, k=k).indices.tolist()
+                domain_summary[f"{key}.shape"] = list(value.shape)
+                domain_summary[f"{key}.top_max_abs"] = [
+                    {
+                        "batch_i": int(i),
+                        "max_abs": float(max_abs[i]),
+                        "rms": float(rms[i]),
+                        "finite": bool(finite[i]),
+                    }
+                    for i in top
+                ]
+            if domain_summary:
+                summary[embodiment_name] = domain_summary
+        return summary
+
+    def _maybe_log_loss_spike_sources(self, raw_batch, losses):
+        threshold = self._debug_spike_threshold()
+        if threshold is None or not self.trainer.is_global_zero:
+            return
+
+        spike_losses = {}
+        for key, value in losses.items():
+            if not key.endswith("_loss"):
+                continue
+            scalar = float(value.detach().cpu())
+            if scalar >= threshold:
+                spike_losses[key] = scalar
+
+        if not spike_losses:
+            return
+
+        print(
+            "[LOSS_SPIKE_DEBUG] "
+            f"global_step={self.global_step} "
+            f"epoch={self.current_epoch} "
+            f"losses={spike_losses} "
+            f"sources={self._summarize_batch_sources(raw_batch)}",
+            flush=True,
+        )
+
     # batch is now a dict, handle on model side
     def training_step(self, batch, batch_idx):
         self.train()
+        raw_batch = batch
         loss_dicts = []
         batch = self.model.process_batch_for_training(batch)
         predictions = self.model.forward_training(batch)
@@ -81,6 +166,8 @@ class ModelWrapper(LightningModule):
                     f"factor={self.debug_loss_spike_factor}",
                     flush=True,
                 )
+
+        self._maybe_log_loss_spike_sources(raw_batch, losses)
 
         info = {}
         info["losses"] = TensorUtils.detach(losses)

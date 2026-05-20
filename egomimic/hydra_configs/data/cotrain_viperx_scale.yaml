@@ -27,7 +27,12 @@ train_datasets:
       _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
       bucket_name: "rldb"
       folder_path: "/data/sybeuret/scale_zarr_cache"
-      max_episodes: 50
+      max_episodes: 400
+      shuffle_episodes: false
+      episode_seed: 42
+      exclude_episode_hashes:
+        - "2026-04-30-11-13-23-231241"
+        - "2026-05-02-18-04-36-276718"
       key_map:
         front_img_1:
           zarr_key: "images.front_1"
@@ -79,7 +84,12 @@ valid_datasets:
       _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
       bucket_name: "rldb"
       folder_path: "/data/sybeuret/scale_zarr_cache"
-      max_episodes: 50
+      max_episodes: 400
+      shuffle_episodes: false
+      episode_seed: 43
+      exclude_episode_hashes:
+        - "2026-04-30-11-13-23-231241"
+        - "2026-05-02-18-04-36-276718"
       key_map:
         front_img_1:
           zarr_key: "images.front_1"

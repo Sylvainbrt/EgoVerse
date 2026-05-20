@@ -198,11 +198,17 @@ class S3EpisodeResolver(EpisodeResolver):
         transform_list: list | None = None,
         debug: bool = False,
         max_episodes: int | None = None,
+        shuffle_episodes: bool = False,
+        episode_seed: int | None = 42,
+        exclude_episode_hashes: list[str] | None = None,
     ):
         self.bucket_name = bucket_name
         self.main_prefix = main_prefix
         self.debug = debug
         self.max_episodes = max_episodes
+        self.shuffle_episodes = shuffle_episodes
+        self.episode_seed = episode_seed
+        self.exclude_episode_hashes = exclude_episode_hashes or []
         super().__init__(folder_path, key_map=key_map, transform_list=transform_list)
 
     def resolve(
@@ -229,6 +235,9 @@ class S3EpisodeResolver(EpisodeResolver):
             local_dir=self.folder_path,
             debug=self.debug,
             max_episodes=self.max_episodes,
+            shuffle_episodes=self.shuffle_episodes,
+            episode_seed=self.episode_seed,
+            exclude_episode_hashes=self.exclude_episode_hashes,
         )
 
         valid_hashes = {hashes for _, hashes in filtered_paths}
@@ -259,6 +268,9 @@ class S3EpisodeResolver(EpisodeResolver):
         filters: dict | None = None,
         debug: bool = False,
         max_episodes: int | None = None,
+        shuffle_episodes: bool = False,
+        episode_seed: int | None = 42,
+        exclude_episode_hashes: list[str] | None = None,
     ) -> list[tuple[str, str]]:
         """
         Filters episodes from the SQL episode table according to the criteria specified in `filters`
@@ -293,6 +305,20 @@ class S3EpisodeResolver(EpisodeResolver):
         logger.info(
             f"Skipped {before_len - len(output)} episodes with null zarr_processed_path: {output}"
         )
+
+        if exclude_episode_hashes:
+            before_exclude = len(output)
+            output = output[~output["episode_hash"].isin(exclude_episode_hashes)]
+            logger.info(
+                "Excluded %d episode hashes from resolver",
+                before_exclude - len(output),
+            )
+
+        if shuffle_episodes:
+            output = output.sample(frac=1.0, random_state=episode_seed).reset_index(
+                drop=True
+            )
+            logger.info("Shuffled episodes with seed=%s", episode_seed)
 
         if max_episodes is not None and max_episodes > 0:
             output = output.head(max_episodes)
@@ -398,6 +424,9 @@ class S3EpisodeResolver(EpisodeResolver):
         numworkers: int = 10,
         debug: bool = False,
         max_episodes=None,
+        shuffle_episodes: bool = False,
+        episode_seed: int | None = 42,
+        exclude_episode_hashes: list[str] | None = None,
     ):
         """
         Public API:
@@ -414,7 +443,12 @@ class S3EpisodeResolver(EpisodeResolver):
 
         # 1) Resolve episodes from DB
         filtered_paths = cls._get_filtered_paths(
-            filters, debug=debug, max_episodes=max_episodes
+            filters,
+            debug=debug,
+            max_episodes=max_episodes,
+            shuffle_episodes=shuffle_episodes,
+            episode_seed=episode_seed,
+            exclude_episode_hashes=exclude_episode_hashes,
         )
         if not filtered_paths:
             logger.warning("No episodes matched filters.")
@@ -558,7 +592,12 @@ class S3StreamingEpisodeResolver(S3EpisodeResolver):
 
         logger.info("Streaming S3 datasets with filters: %s", filters)
         filtered_paths = self._get_filtered_paths(
-            filters, debug=self.debug, max_episodes=self.max_episodes
+            filters,
+            debug=self.debug,
+            max_episodes=self.max_episodes,
+            shuffle_episodes=self.shuffle_episodes,
+            episode_seed=self.episode_seed,
+            exclude_episode_hashes=self.exclude_episode_hashes,
         )
 
         if not filtered_paths:
@@ -654,6 +693,8 @@ class MultiDataset(torch.utils.data.Dataset):
         data["metadata.robot_name"] = robot_name
         data["embodiment"] = robot_name
         data["metadata.embodiment"] = get_embodiment_id(robot_name.upper())
+        data["metadata.episode_hash"] = dataset_name
+        data["metadata.frame_idx"] = local_idx
 
         return data
 
