@@ -33,6 +33,7 @@ train_datasets:
       exclude_episode_hashes:
         - "2026-04-30-11-13-23-231241"
         - "2026-05-02-18-04-36-276718"
+        - "2026-05-01-18-36-37-480092"
       key_map:
         front_img_1:
           zarr_key: "images.front_1"
@@ -86,10 +87,11 @@ valid_datasets:
       folder_path: "/data/sybeuret/scale_zarr_cache"
       max_episodes: 500
       shuffle_episodes: true
-      episode_seed: 43
+      episode_seed: 42
       exclude_episode_hashes:
         - "2026-04-30-11-13-23-231241"
         - "2026-05-02-18-04-36-276718"
+        - "2026-05-01-18-36-37-480092"
       key_map:
         front_img_1:
           zarr_key: "images.front_1"
