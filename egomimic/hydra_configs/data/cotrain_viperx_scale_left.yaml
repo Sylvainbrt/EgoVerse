@@ -1,0 +1,136 @@
+_target_: egomimic.pl_utils.pl_data_utils.MultiDataModuleWrapper
+
+train_datasets:
+  viperx_left_arm:
+    _target_: egomimic.rldb.utils.FolderRLDBDataset
+    folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
+    embodiment: viperx_left_arm
+    mode: train
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.left_wrist_img
+    state_keys:
+      - observation.state
+    resolver:
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.left_wrist_img: left_wrist_img
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+
+  scale_bimanual:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    mode: train
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      bucket_name: "rldb"
+      folder_path: "/data/sybeuret/scale_zarr_cache"
+      max_episodes: 500
+      shuffle_episodes: true
+      episode_seed: 42
+      exclude_episode_hashes:
+        - "2026-04-30-11-13-23-231241"
+        - "2026-05-02-18-04-36-276718"
+        - "2026-05-01-18-36-37-480092"
+      key_map:
+        front_img_1:
+          zarr_key: "images.front_1"
+        right.action_ee_pose:
+          zarr_key: "right.obs_ee_pose"
+          horizon: 30
+        left.action_ee_pose:
+          zarr_key: "left.obs_ee_pose"
+          horizon: 30
+        right.obs_ee_pose:
+          zarr_key: "right.obs_ee_pose"
+        left.obs_ee_pose:
+          zarr_key: "left.obs_ee_pose"
+        obs_head_pose:
+          zarr_key: "obs_head_pose"
+      transform_list:
+        _target_: egomimic.rldb.embodiment.human._build_aria_bimanual_transform_list
+        actions_key: actions_cartesian
+        obs_key: state_ee_pose
+        chunk_length: 100
+        stride: 1
+    filters:
+      robot_name: "scale_bimanual"
+
+valid_datasets:
+  viperx_left_arm:
+    _target_: egomimic.rldb.utils.FolderRLDBDataset
+    folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
+    embodiment: viperx_left_arm
+    mode: valid
+    camera_keys:
+      - observation.images.front_img_1
+      - observation.images.left_wrist_img
+    state_keys:
+      - observation.state
+    resolver:
+      key_map:
+        observation.images.front_img_1: front_img_1
+        observation.images.left_wrist_img: left_wrist_img
+        actions.joints_act: actions_joints
+        observation.state: joint_positions
+
+  scale_bimanual:
+    _target_: egomimic.rldb.zarr.zarr_dataset_multi.MultiDataset._from_resolver
+    mode: valid
+    resolver:
+      _target_: egomimic.rldb.zarr.zarr_dataset_multi.S3EpisodeResolver
+      bucket_name: "rldb"
+      folder_path: "/data/sybeuret/scale_zarr_cache"
+      max_episodes: 500
+      shuffle_episodes: true
+      episode_seed: 42
+      exclude_episode_hashes:
+        - "2026-04-30-11-13-23-231241"
+        - "2026-05-02-18-04-36-276718"
+        - "2026-05-01-18-36-37-480092"
+      key_map:
+        front_img_1:
+          zarr_key: "images.front_1"
+        right.action_ee_pose:
+          zarr_key: "right.obs_ee_pose"
+          horizon: 30
+        left.action_ee_pose:
+          zarr_key: "left.obs_ee_pose"
+          horizon: 30
+        right.obs_ee_pose:
+          zarr_key: "right.obs_ee_pose"
+        left.obs_ee_pose:
+          zarr_key: "left.obs_ee_pose"
+        obs_head_pose:
+          zarr_key: "obs_head_pose"
+      transform_list:
+        _target_: egomimic.rldb.embodiment.human._build_aria_bimanual_transform_list
+        actions_key: actions_cartesian
+        obs_key: state_ee_pose
+        chunk_length: 100
+        stride: 1
+    filters:
+      robot_name: "scale_bimanual"
+
+
+train_dataloader_params:
+  viperx_left_arm:
+    batch_size: 8
+    num_workers: 4
+  scale_bimanual:
+    batch_size: 16
+    num_workers: 16
+    persistent_workers: true
+    prefetch_factor: 4
+    pin_memory: true
+  
+valid_dataloader_params:
+  viperx_left_arm:
+    batch_size: 8
+    num_workers: 4
+  scale_bimanual:
+    batch_size: 16
+    num_workers: 16
+    persistent_workers: true
+    prefetch_factor: 4
+    pin_memory: true

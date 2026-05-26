@@ -41,7 +41,7 @@ Original recorded dataset at:
 
 | Property            | Original Value                     | Converted Value (EgoVerse)       |
 | ------------------- | ---------------------------------- | -------------------------------- |
-| `robot_type`        | "viperx"                           | "viperx_right_arm"               |
+| `robot_type`        | "viperx"                           | "viperx_right_arm" or "viperx_left_arm" |
 | Action shape        | (T, 9) - 2 shadow joints           | (T, 100, 7) chunked 7-DoF        |
 | `observation.state` | (T, 9)                             | (T, 7)                           |
 | Images              | observation.images...              | observation.images...            |
@@ -52,7 +52,7 @@ Original recorded dataset at:
 ## Completed Implementations
 
 ### 1. Embodiment Setup
-- **`egomimic/rldb/embodiment/embodiment.py`**: Added `VIPERX_RIGHT_ARM = 15` to the `EMBODIMENT` enum.
+- **`egomimic/rldb/embodiment/embodiment.py`**: Added `VIPERX_RIGHT_ARM = 15` and `VIPERX_LEFT_ARM = 16` to the `EMBODIMENT` enum.
 - **`egomimic/rldb/embodiment/viperx.py`**: Created `ViperX` mapping class defining `get_keymap()` and image formats (`[B, C, H, W]`).
 
 ### 2. Dataset Processing
@@ -128,7 +128,15 @@ cd /data/sybeuret/codes/EgoVerse
 python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
   --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
-  --repo-id     lerobot/pick_and_place_egoverse
+  --repo-id     lerobot/pick_and_place_egoverse \
+  --arm         right
+
+# For a left-arm dataset, switch the embodiment and keep the same source path shape.
+python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
+  --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_left \
+  --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_left_egoverse \
+  --repo-id     lerobot/pick_and_place_left_egoverse \
+  --arm         left
 
 # Restore missing video columns 
 python egomimic/scripts/viperx_process/fix_episodes_metadata.py
@@ -142,6 +150,14 @@ python egomimic/trainHydra.py \
   --config-name=train \
   data=viperx_local \
   model=hpt_bc_flow_viperx \
+  logger=wandb \
+  trainer=ddp
+
+# Left-arm variant
+python egomimic/trainHydra.py \
+  --config-name=train \
+  data=viperx_local_left \
+  model=hpt_bc_flow_viperx_left \
   logger=wandb \
   trainer=ddp
 ```
@@ -168,11 +184,21 @@ python egomimic/trainHydra.py \
   logger=wandb \
   trainer=ddp \
   trainer.strategy=ddp_find_unused_parameters_true
+
+# Left-arm variant
+python egomimic/trainHydra.py \
+  --config-name=train \
+  data=cotrain_viperx_scale_left \
+  model=hpt_cotrain_viperx_scale_left \
+  logger=wandb \
+  trainer=ddp \
+  trainer.strategy=ddp_find_unused_parameters_true
 ```
 
 This run uses two datasets at each training step:
 
 - `viperx_right_arm`: local LeRobot data, action key `actions_joints`, shape `(64, 7)`.
+- `viperx_left_arm`: same 7-DoF local format, but with `observation.images.left_wrist_img`.
 - `scale_bimanual`: Scale Zarr data, action key `actions_cartesian`, shape `(100, 12)`.
 
 The Scale raw Zarr episodes do not store `actions_cartesian` directly. They store:
@@ -328,3 +354,7 @@ EgoVerse is designed to scale dynamically across diverse datasets and embodiment
 2. **ViperX + Scale Co-Training**: Use `cotrain_viperx_scale.yaml` with a shared visual trunk, a ViperX 7-DoF joint head, and a Scale 12-DoF Cartesian head. Start with `max_episodes: 50` or `100`, then increase after throughput and loss curves look healthy.
 3. **Full Dataset Scale (S3/Cluster)**: Use S3/Zarr resolvers to leverage thousands of episodes across unified visual trunks. For single-machine experiments, prefer a local cache subset if disk space allows. For full remote streaming, expect to need more CPU/network bandwidth and multiple GPUs.
 4. **Action-Free Human Co-Training**: Use Ego4D and Project Aria human demonstration datasets (`human_hands` embodiment) to heavily pre-train the model's visual trunk. The human data (which lacks explicit robot actions) improves visual representation learning, while your ViperX data fine-tunes the action-decoding head.
+
+
+
+EGOVERSE_DEBUG_LOSS_THRESHOLD=100000 RUN_LOCAL=0 RUN_ARIA=0 RUN_CACHED=1 RUN_STREAMING=0 SCALE_EPISODES=500 CACHE_DIR=/data/sybeuret/scale_zarr_cache bash scripts/run_viperx_experiments.sh

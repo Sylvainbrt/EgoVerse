@@ -3,16 +3,17 @@ Convert a ViperX LeRobot dataset to EgoVerse-compatible LeRobot format.
 
 Adds:
   - actions.joints_act  : (T, 100, 7) pre-chunked joint actions (9→7 DoF)
-  - metadata.embodiment : (T, 1) int32 embodiment id
+  - metadata.embodiment : scalar int32 embodiment id per frame
 
 Strips shadow joints at indices 2 and 4 from 9-DoF → 7-DoF.
-Updates info.json robot_type to "viperx_right_arm".
+Updates info.json robot_type to "viperx_right_arm" or "viperx_left_arm".
 
 Usage:
     python viperx_to_lerobot.py \
         --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
         --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
         --repo-id     lerobot/pick_and_place_egoverse
+        --arm         right
 """
 
 import argparse
@@ -26,6 +27,7 @@ import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from egomimic.rldb.embodiment.embodiment import EMBODIMENT
+from egomimic.scripts.viperx_process.fix_episodes_metadata import fix_episodes_metadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,7 +66,21 @@ def process_episode(actions_9dof: np.ndarray):
     return joints_7dof, joints_act_chunk
 
 
-def convert(input_path: Path, output_path: Path, repo_id: str):
+ARM_TO_ROBOT_TYPE = {
+    "right": "viperx_right_arm",
+    "left": "viperx_left_arm",
+}
+
+ARM_TO_EMBODIMENT = {
+    "right": EMBODIMENT.VIPERX_RIGHT_ARM.value,
+    "left": EMBODIMENT.VIPERX_LEFT_ARM.value,
+}
+
+
+def convert(input_path: Path, output_path: Path, repo_id: str, arm: str):
+    robot_type = ARM_TO_ROBOT_TYPE[arm]
+    embodiment_id = ARM_TO_EMBODIMENT[arm]
+
     # ── 1. Load source dataset ────────────────────────────────────────────────
     logger.info(f"Loading source dataset from {input_path}")
     src = LeRobotDataset(
@@ -121,12 +137,37 @@ def convert(input_path: Path, output_path: Path, repo_id: str):
     dst = LeRobotDataset.create(
         repo_id=repo_id,
         fps=src.fps,
-        robot_type="viperx_right_arm",
+        robot_type=robot_type,
         features=new_features,
         root=output_path,
     )
 
-    embodiment_id = EMBODIMENT.VIPERX_RIGHT_ARM.value
+    # LeRobot validates shape-(1,) numeric features as arrays, but serializes them
+    # as scalar Values in HF datasets. Mirror the Aria converter workaround by
+    # squeezing those entries right before parquet serialization.
+    if not hasattr(dst, "_is_patched_for_hf_value"):
+        orig_save_episode_data = dst._save_episode_data
+
+        def safe_save_episode_data(episode_buffer):
+            for key in episode_buffer:
+                if key in new_features and new_features[key]["shape"] == (1,):
+                    val = episode_buffer[key]
+                    if (
+                        isinstance(val, np.ndarray)
+                        and val.ndim == 2
+                        and val.shape[1] == 1
+                    ):
+                        episode_buffer[key] = val.squeeze(1)
+                    if (
+                        isinstance(val, list)
+                        and len(val) > 0
+                        and getattr(val[0], "shape", None) == (1,)
+                    ):
+                        episode_buffer[key] = [v.item() for v in val]
+            return orig_save_episode_data(episode_buffer)
+
+        dst._save_episode_data = safe_save_episode_data
+        dst._is_patched_for_hf_value = True
 
     # ── 4. Iterate episodes ───────────────────────────────────────────────────
     num_episodes = src.num_episodes
@@ -159,9 +200,7 @@ def convert(input_path: Path, output_path: Path, repo_id: str):
             frame["actions.joints_act"] = torch.from_numpy(
                 joints_act_chunk[local_t].astype(np.float32)
             )
-            frame["metadata.embodiment"] = torch.tensor(
-                [embodiment_id], dtype=torch.int32
-            )
+            frame["metadata.embodiment"] = np.array([embodiment_id], dtype=np.int32)
             dst.add_frame(frame)
 
         dst.save_episode()
@@ -192,14 +231,25 @@ def convert(input_path: Path, output_path: Path, repo_id: str):
     logger.info(f"robot_type: {info['robot_type']} ✓")
     logger.info(f"features: {list(info['features'].keys())}")
 
+    if src_videos.exists():
+        logger.info("Adding missing video metadata to episodes parquet...")
+        fix_episodes_metadata(output_path)
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-path", type=Path, required=True)
     parser.add_argument("--output-path", type=Path, required=True)
     parser.add_argument("--repo-id", type=str, required=True)
+    parser.add_argument(
+        "--arm",
+        type=str,
+        choices=sorted(ARM_TO_ROBOT_TYPE),
+        default="right",
+        help="Which ViperX arm embodiment this dataset should target.",
+    )
     args = parser.parse_args()
-    convert(args.input_path, args.output_path, args.repo_id)
+    convert(args.input_path, args.output_path, args.repo_id, args.arm)
 
 
 if __name__ == "__main__":
