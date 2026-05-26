@@ -143,6 +143,19 @@ python egomimic/scripts/viperx_process/fix_episodes_metadata.py
 ```
 
 ### Training Run
+## Available training modalities
+
+The current ViperX-related training configs in EgoVerse now cover:
+
+- `data=viperx_local` + `model=hpt_bc_flow_viperx`
+  Robot only, local converted LeRobot data.
+- `data=cotrain_viperx_aria_local` + `model=hpt_cotrain_viperx_aria`
+  Robot + local Aria human demos.
+- `data=cotrain_viperx_scale` + `model=hpt_cotrain_viperx_scale`
+  Robot + cached EgoVerse / Scale episodes.
+- `data=cotrain_viperx_aria_scale` + `model=hpt_cotrain_viperx_aria_scale`
+  Robot + local Aria + cached EgoVerse / Scale episodes.
+
 ## Option A: Training from scratch on local data
 
 ```bash
@@ -239,6 +252,69 @@ resolver:
 `S3EpisodeResolver` downloads selected episodes into `folder_path` and skips
 episodes that are already present on later runs. This is recommended when S3
 streaming produces bursty GPU utilization.
+
+## Option D: Co-Training ViperX + Aria + EgoVerse Cached
+
+Use the new three-way config when you want to mix:
+
+- local converted ViperX robot data
+- local processed Aria human demos
+- cached EgoVerse / Scale Zarr episodes
+
+Example with `500` cached EgoVerse episodes:
+
+```bash
+python egomimic/trainHydra.py \
+  --config-name=train \
+  data=cotrain_viperx_aria_scale \
+  model=hpt_cotrain_viperx_aria_scale \
+  logger=wandb \
+  trainer=ddp \
+  trainer.strategy=ddp_find_unused_parameters_true \
+  data.train_datasets.viperx_right_arm.folder_path=/data/sybeuret/remote_data_lerobot/egoverse_data \
+  data.valid_datasets.viperx_right_arm.folder_path=/data/sybeuret/remote_data_lerobot/egoverse_data \
+  data.train_datasets.aria_right_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data \
+  data.valid_datasets.aria_right_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data \
+  data.train_datasets.scale_bimanual.resolver.folder_path=/data/sybeuret/scale_zarr_cache \
+  data.valid_datasets.scale_bimanual.resolver.folder_path=/data/sybeuret/scale_zarr_cache \
+  data.train_datasets.scale_bimanual.resolver.max_episodes=500 \
+  data.valid_datasets.scale_bimanual.resolver.max_episodes=500
+```
+
+To run the same ablation with `2000` cached EgoVerse episodes, only change:
+
+```bash
+data.train_datasets.scale_bimanual.resolver.max_episodes=2000 \
+data.valid_datasets.scale_bimanual.resolver.max_episodes=2000
+```
+
+## Sequential ablation script
+
+If you want to run the non-Aria ablations one after another, use:
+
+```bash
+cd /data/sybeuret/codes/EgoVerse
+bash egomimic/robot/viperx/run_viperx_non_aria_ablations.sh
+```
+
+This launches, in order:
+
+- `robot_only_local`
+- `robot_plus_egoverse_cached_500`
+- `robot_plus_egoverse_cached_2000`
+
+The script defaults to:
+
+- `ROBOT_DATA_DIR=/data/sybeuret/remote_data_lerobot/egoverse_data`
+- `SCALE_CACHE_DIR=/tmp/scale_zarr_cache`
+
+You can override them at launch time, for example:
+
+```bash
+ROBOT_DATA_DIR=/data/sybeuret/remote_data_lerobot/egoverse_data \
+SCALE_CACHE_DIR=/tmp/scale_zarr_cache \
+bash egomimic/robot/viperx/run_viperx_non_aria_ablations.sh
+```
 
 Check cache size with:
 
