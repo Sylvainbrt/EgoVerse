@@ -218,6 +218,38 @@ The Scale raw Zarr episodes do not store `actions_cartesian` directly. They stor
 
 - `images.front_1`
 - `left.obs_ee_pose`
+
+## Freezing the Scale episode pool
+
+If you want reproducible Scale co-training without downloading newly selected
+episodes as the remote SQL table changes, freeze the exact episode list once and
+reuse it in later runs.
+
+1. Create a frozen manifest:
+
+```bash
+cd /data/sybeuret/codes/EgoVerse
+
+python3 egomimic/scripts/data_download/freeze_scale_episode_list.py \
+  --out /tmp/scale_500_manifest.json \
+  --max-episodes 500
+```
+
+2. Train against that fixed list:
+
+```bash
+cd /data/sybeuret/codes/EgoVerse
+
+SCALE_MANIFEST_PATH=/tmp/scale_500_manifest.json \
+bash egomimic/robot/viperx/run_viperx_non_aria_ablations.sh
+```
+
+If the cache is already fully populated and you want to forbid any new downloads,
+also set:
+
+```bash
+SCALE_MANIFEST_LOCAL_ONLY=1
+```
 - `right.obs_ee_pose`
 - `obs_head_pose`
 

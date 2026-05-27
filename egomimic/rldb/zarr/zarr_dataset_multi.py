@@ -640,6 +640,116 @@ class S3StreamingEpisodeResolver(S3EpisodeResolver):
         return self._build_zarr_datasets(remote_episode_paths)
 
 
+class ManifestEpisodeResolver(EpisodeResolver):
+    """
+    Resolves episodes from a frozen manifest file instead of querying SQL.
+
+    The manifest freezes the exact list of episode hashes / processed paths so later
+    training runs reuse the same episode pool even if the remote SQL table changes.
+    """
+
+    def __init__(
+        self,
+        folder_path: Path,
+        manifest_path: str | Path,
+        bucket_name: str = "rldb",
+        key_map: dict | None = None,
+        transform_list: list | None = None,
+        sync_missing: bool = True,
+        max_episodes: int | None = None,
+        shuffle_episodes: bool = False,
+        episode_seed: int | None = 42,
+        exclude_episode_hashes: list[str] | None = None,
+    ):
+        self.manifest_path = Path(manifest_path)
+        self.bucket_name = bucket_name
+        self.sync_missing = sync_missing
+        self.max_episodes = max_episodes
+        self.shuffle_episodes = shuffle_episodes
+        self.episode_seed = episode_seed
+        self.exclude_episode_hashes = exclude_episode_hashes or []
+        super().__init__(folder_path, key_map=key_map, transform_list=transform_list)
+
+    def _load_manifest_entries(self) -> list[tuple[str, str]]:
+        if not self.manifest_path.is_file():
+            raise FileNotFoundError(f"Manifest file not found: {self.manifest_path}")
+
+        with self.manifest_path.open() as f:
+            payload = json.load(f)
+
+        episodes = payload.get("episodes", payload)
+        if not isinstance(episodes, list):
+            raise ValueError(
+                f"Manifest must contain a list or an 'episodes' list: {self.manifest_path}"
+            )
+
+        entries: list[tuple[str, str]] = []
+        for item in episodes:
+            if isinstance(item, dict):
+                processed_path = item.get("processed_path")
+                episode_hash = item.get("episode_hash")
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                processed_path, episode_hash = item
+            else:
+                raise ValueError(
+                    f"Unsupported manifest episode entry {item!r} in {self.manifest_path}"
+                )
+
+            if not processed_path or not episode_hash:
+                raise ValueError(
+                    f"Manifest episode entry missing processed_path/episode_hash: {item!r}"
+                )
+
+            entries.append((str(processed_path), str(episode_hash)))
+
+        return entries
+
+    def resolve(
+        self,
+        filters: dict | None = None,
+    ) -> dict[str, "ZarrDataset"]:
+        if filters:
+            logger.warning(
+                "ManifestEpisodeResolver ignores runtime filters and uses the frozen manifest: %s",
+                self.manifest_path,
+            )
+
+        entries = self._load_manifest_entries()
+        if self.max_episodes is not None and self.max_episodes > 0:
+            entries = entries[: self.max_episodes]
+        logger.info(
+            "Loaded %d frozen manifest episodes from %s",
+            len(entries),
+            self.manifest_path,
+        )
+
+        self.folder_path.mkdir(parents=True, exist_ok=True)
+
+        if self.sync_missing:
+            S3EpisodeResolver._sync_s3_to_local(
+                bucket_name=self.bucket_name,
+                s3_paths=entries,
+                local_dir=self.folder_path,
+            )
+
+        local_episode_paths = []
+        missing = []
+        for _, episode_hash in entries:
+            local_path = self._local_episode_path(self.folder_path, episode_hash)
+            if not local_path.is_dir():
+                missing.append(episode_hash)
+                continue
+            local_episode_paths.append((local_path, episode_hash))
+
+        if missing:
+            raise FileNotFoundError(
+                "Frozen manifest references episodes missing from local cache: "
+                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+            )
+
+        return self._build_zarr_datasets(local_episode_paths)
+
+
 class MultiDataset(torch.utils.data.Dataset):
     """
     Self wrapping MultiDataset, can wrap zarr or multi dataset.
@@ -684,13 +794,13 @@ class MultiDataset(torch.utils.data.Dataset):
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-        self.datasets = {rid: ds for rid, ds in datasets.items() if rid in chosen}
-        assert self.datasets, "No datasets left after applying mode split."
-
+        self.all_datasets = {rid: ds for rid, ds in datasets.items() if rid in chosen}
+        assert self.all_datasets, "No datasets left after applying mode split."
+        self.datasets = dict(self.all_datasets)
+        self.runtime_excluded_episode_hashes = set()
+        self.pending_excluded_episode_hashes = set()
         self.index_map = []
-        for dataset_name, dataset in self.datasets.items():
-            for local_idx in range(len(dataset)):
-                self.index_map.append((dataset_name, local_idx))
+        self._rebuild_index_map()
 
         super().__init__()
 
@@ -705,6 +815,46 @@ class MultiDataset(torch.utils.data.Dataset):
         self.embodiment = _EMBODIMENT_ALIASES.get(
             raw_embodiment.lower(), raw_embodiment
         )
+
+    def _rebuild_index_map(self):
+        self.datasets = {
+            rid: ds
+            for rid, ds in self.all_datasets.items()
+            if rid not in self.runtime_excluded_episode_hashes
+        }
+        assert self.datasets, "No datasets left after runtime exclusions."
+
+        self.index_map = []
+        for dataset_name, dataset in self.datasets.items():
+            for local_idx in range(len(dataset)):
+                self.index_map.append((dataset_name, local_idx))
+
+    def queue_exclude_episode_hashes(self, episode_hashes: list[str] | set[str]):
+        for episode_hash in episode_hashes:
+            if (
+                episode_hash in self.all_datasets
+                and episode_hash not in self.runtime_excluded_episode_hashes
+            ):
+                self.pending_excluded_episode_hashes.add(episode_hash)
+
+    def peek_pending_exclusions(self) -> list[str]:
+        return sorted(self.pending_excluded_episode_hashes)
+
+    def apply_pending_exclusions(self) -> list[str]:
+        if not self.pending_excluded_episode_hashes:
+            return []
+
+        applied = sorted(
+            self.pending_excluded_episode_hashes - self.runtime_excluded_episode_hashes
+        )
+        if not applied:
+            self.pending_excluded_episode_hashes.clear()
+            return []
+
+        self.runtime_excluded_episode_hashes.update(applied)
+        self.pending_excluded_episode_hashes.clear()
+        self._rebuild_index_map()
+        return applied
 
     def __len__(self) -> int:
         return len(self.index_map)

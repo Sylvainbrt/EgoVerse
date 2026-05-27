@@ -161,6 +161,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     log.info("Instantiating loggers...")
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
 
+    if os.environ.get("EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS") is not None:
+        cfg.trainer.reload_dataloaders_every_n_epochs = 1
+        log.info(
+            "Enabled trainer.reload_dataloaders_every_n_epochs=1 because "
+            "EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS is set."
+        )
+
     log.info(f"Instantiating trainer <{cfg.trainer._target_}>")
     plugins = []
     if os.environ.get("SLURM_JOB_ID"):

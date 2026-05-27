@@ -4,6 +4,7 @@ import os
 import random
 import subprocess
 import tempfile
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -45,6 +46,63 @@ logging.getLogger("datasets").setLevel(logging.ERROR)
 logging.getLogger("huggingface_hub._snapshot_download").setLevel(logging.ERROR)
 
 SEED = 42
+PATH_RETRY_ATTEMPTS = 5
+PATH_RETRY_SLEEP_S = 1.0
+
+
+def _retryable_path_error(exc: Exception) -> bool:
+    if isinstance(exc, ConnectionAbortedError):
+        return True
+    if isinstance(exc, OSError):
+        # 103 = software caused connection abort, commonly seen on flaky mounts
+        return getattr(exc, "errno", None) in {103, 104, 110, 111}
+    return False
+
+
+def _safe_is_dir(path: Path, attempts: int = PATH_RETRY_ATTEMPTS) -> bool:
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return path.is_dir()
+        except Exception as exc:
+            last_exc = exc
+            if not _retryable_path_error(exc) or attempt == attempts:
+                raise
+            logger.warning(
+                "Transient filesystem error while checking directory %s "
+                "(attempt %d/%d): %s",
+                path,
+                attempt,
+                attempts,
+                exc,
+            )
+            time.sleep(PATH_RETRY_SLEEP_S)
+    if last_exc is not None:
+        raise last_exc
+    return False
+
+
+def _safe_subdirs(path: Path, attempts: int = PATH_RETRY_ATTEMPTS) -> list[Path]:
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return sorted([p for p in path.iterdir() if _safe_is_dir(p)])
+        except Exception as exc:
+            last_exc = exc
+            if not _retryable_path_error(exc) or attempt == attempts:
+                raise
+            logger.warning(
+                "Transient filesystem error while listing directory %s "
+                "(attempt %d/%d): %s",
+                path,
+                attempt,
+                attempts,
+                exc,
+            )
+            time.sleep(PATH_RETRY_SLEEP_S)
+    if last_exc is not None:
+        raise last_exc
+    return []
 
 
 def split_dataset_names(dataset_names, valid_ratio=0.2, seed=SEED):
@@ -444,14 +502,14 @@ class FolderRLDBDataset(MultiRLDBDataset):
         **kwargs,
     ):
         folder_path = Path(folder_path)
-        assert folder_path.is_dir(), f"{folder_path} is not a valid directory."
+        assert _safe_is_dir(folder_path), f"{folder_path} is not a valid directory."
         assert mode in ["train", "valid", "percent", "total"], f"Invalid mode: {mode}"
         assert embodiment is not None, "embodiment should not be None"
 
         datasets = {}
         skipped = []
 
-        subdirs = sorted([p for p in folder_path.iterdir() if p.is_dir()])
+        subdirs = _safe_subdirs(folder_path)
         logger.info(
             f"Found {len(subdirs)} subfolders. Attempting to load valid RLDB datasets..."
         )

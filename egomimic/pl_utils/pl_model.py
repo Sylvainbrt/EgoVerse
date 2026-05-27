@@ -41,6 +41,7 @@ class ModelWrapper(LightningModule):
         except Exception:
             pass
         self.grad_norm_history = deque(maxlen=self.grad_norm_mad_window)
+        self.auto_exclusion_pending = {}
 
         self.val_image_buffer, self.val_counter = {}, {}
         self.epoch_memory_stats = []  # Store memory stats per epoch
@@ -62,6 +63,21 @@ class ModelWrapper(LightningModule):
             if self.trainer.is_global_zero:
                 print(
                     f"[LOSS_SPIKE_DEBUG] invalid EGOVERSE_DEBUG_LOSS_THRESHOLD={value!r}",
+                    flush=True,
+                )
+            return None
+
+    def _auto_exclude_action_max_abs_threshold(self):
+        value = os.environ.get("EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except ValueError:
+            if self.trainer.is_global_zero:
+                print(
+                    "[AUTO_EXCLUDE_QUEUE] "
+                    f"invalid EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS={value!r}",
                     flush=True,
                 )
             return None
@@ -136,6 +152,121 @@ class ModelWrapper(LightningModule):
             flush=True,
         )
 
+    def _maybe_queue_auto_excluded_episodes(self, raw_batch):
+        threshold = self._auto_exclude_action_max_abs_threshold()
+        if threshold is None:
+            return
+
+        domain_name = "scale_bimanual"
+        domain_batch = raw_batch.get(domain_name)
+        if not isinstance(domain_batch, dict):
+            return
+
+        actions = domain_batch.get("actions_cartesian")
+        episode_hashes = domain_batch.get("metadata.episode_hash")
+        if not isinstance(actions, torch.Tensor) or episode_hashes is None:
+            return
+
+        if isinstance(episode_hashes, torch.Tensor):
+            episode_hashes = episode_hashes.detach().cpu().tolist()
+        elif isinstance(episode_hashes, tuple):
+            episode_hashes = list(episode_hashes)
+        else:
+            episode_hashes = list(episode_hashes)
+
+        flat = actions.detach().float().reshape(actions.shape[0], -1).cpu()
+        finite = torch.isfinite(flat).all(dim=1).tolist()
+        max_abs = flat.abs().amax(dim=1).tolist()
+
+        bad_hashes = set()
+        details = []
+        for i, episode_hash in enumerate(episode_hashes[: len(max_abs)]):
+            if (not finite[i]) or max_abs[i] >= threshold:
+                episode_hash = str(episode_hash)
+                bad_hashes.add(episode_hash)
+                details.append(
+                    {
+                        "batch_i": i,
+                        "episode_hash": episode_hash,
+                        "max_abs": float(max_abs[i]),
+                        "finite": bool(finite[i]),
+                    }
+                )
+
+        if not bad_hashes:
+            return
+
+        pending = self.auto_exclusion_pending.setdefault(domain_name, set())
+        new_hashes = sorted(bad_hashes - pending)
+        pending.update(bad_hashes)
+
+        if new_hashes and self.trainer.is_global_zero:
+            print(
+                "[AUTO_EXCLUDE_QUEUE] "
+                f"step={self.global_step} "
+                f"epoch={self.current_epoch} "
+                f"dataset={domain_name} "
+                f"threshold={threshold} "
+                f"details={details}",
+                flush=True,
+            )
+
+    def _gather_auto_exclusion_pending(self):
+        local = {
+            dataset_name: sorted(hashes)
+            for dataset_name, hashes in self.auto_exclusion_pending.items()
+            if hashes
+        }
+
+        if not (
+            torch.distributed.is_available() and torch.distributed.is_initialized()
+        ):
+            return local
+
+        gathered = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered, local)
+
+        merged = {}
+        for item in gathered:
+            if not item:
+                continue
+            for dataset_name, hashes in item.items():
+                merged.setdefault(dataset_name, set()).update(hashes)
+
+        return {dataset_name: sorted(hashes) for dataset_name, hashes in merged.items()}
+
+    def _persist_auto_excluded_hashes(self, merged):
+        if not merged or not self.trainer.is_global_zero:
+            return
+
+        output_path = os.environ.get(
+            "EGOVERSE_AUTO_EXCLUDE_PERSIST_PATH",
+            os.path.join(self.root_dir(), "auto_excluded_episode_hashes.txt"),
+        )
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        existing = set()
+        if os.path.exists(output_path):
+            with open(output_path) as f:
+                existing = {line.strip() for line in f if line.strip()}
+
+        appended = []
+        with open(output_path, "a") as f:
+            for dataset_name, hashes in sorted(merged.items()):
+                for episode_hash in sorted(hashes):
+                    line = f"{dataset_name}:{episode_hash}"
+                    if line in existing:
+                        continue
+                    f.write(line + "\n")
+                    existing.add(line)
+                    appended.append(line)
+
+        if appended:
+            print(
+                "[AUTO_EXCLUDE_APPLY] " f"persisted={appended} " f"path={output_path}",
+                flush=True,
+            )
+
     # batch is now a dict, handle on model side
     def training_step(self, batch, batch_idx):
         self.train()
@@ -168,6 +299,7 @@ class ModelWrapper(LightningModule):
                 )
 
         self._maybe_log_loss_spike_sources(raw_batch, losses)
+        self._maybe_queue_auto_excluded_episodes(raw_batch)
 
         info = {}
         info["losses"] = TensorUtils.detach(losses)
@@ -353,3 +485,29 @@ class ModelWrapper(LightningModule):
             log_all[f"Optimizer/param_group_{i}_lr"] = param_group["lr"]
 
         return super().on_train_epoch_start()
+
+    def on_train_epoch_end(self):
+        merged = self._gather_auto_exclusion_pending()
+        if merged:
+            datamodule = getattr(self.trainer, "datamodule", None)
+            if datamodule is not None and hasattr(
+                datamodule, "queue_exclude_episode_hashes"
+            ):
+                for dataset_name, hashes in merged.items():
+                    datamodule.queue_exclude_episode_hashes(
+                        dataset_name, hashes, split="both"
+                    )
+                applied = datamodule.apply_pending_exclusions()
+                self._persist_auto_excluded_hashes(merged)
+                if self.trainer.is_global_zero:
+                    print(
+                        "[AUTO_EXCLUDE_APPLY] "
+                        f"epoch={self.current_epoch} "
+                        f"merged={merged} "
+                        f"applied={applied} "
+                        "next epoch will use the updated pool",
+                        flush=True,
+                    )
+            self.auto_exclusion_pending = {}
+
+        return super().on_train_epoch_end()

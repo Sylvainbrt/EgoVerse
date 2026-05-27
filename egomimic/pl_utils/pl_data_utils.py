@@ -77,6 +77,38 @@ class MultiDataModuleWrapper(LightningDataModule):
         else:
             self.collate_fn = default_collate
 
+    def queue_exclude_episode_hashes(
+        self,
+        dataset_name: str,
+        episode_hashes: list[str] | set[str],
+        split: str = "both",
+    ):
+        targets = []
+        if split in ("train", "both") and dataset_name in self.train_datasets:
+            targets.append(self.train_datasets[dataset_name])
+        if split in ("valid", "both") and dataset_name in self.valid_datasets:
+            targets.append(self.valid_datasets[dataset_name])
+
+        for dataset in targets:
+            if hasattr(dataset, "queue_exclude_episode_hashes"):
+                dataset.queue_exclude_episode_hashes(episode_hashes)
+
+    def apply_pending_exclusions(self):
+        applied = {"train": {}, "valid": {}}
+
+        for split_name, datasets in (
+            ("train", self.train_datasets),
+            ("valid", self.valid_datasets),
+        ):
+            for dataset_name, dataset in datasets.items():
+                if not hasattr(dataset, "apply_pending_exclusions"):
+                    continue
+                removed = dataset.apply_pending_exclusions()
+                if removed:
+                    applied[split_name][dataset_name] = removed
+
+        return applied
+
     def train_dataloader(self):
         iterables = dict()
         for dataset_name, dataset in self.train_datasets.items():
