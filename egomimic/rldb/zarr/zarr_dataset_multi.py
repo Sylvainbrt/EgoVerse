@@ -704,6 +704,38 @@ class ManifestEpisodeResolver(EpisodeResolver):
 
         return entries
 
+    def _apply_manifest_filters(
+        self, entries: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        if not self.exclude_episode_hashes:
+            return entries
+
+        excluded = set(self.exclude_episode_hashes)
+        filtered = [
+            (processed_path, episode_hash)
+            for processed_path, episode_hash in entries
+            if episode_hash not in excluded
+        ]
+        if len(filtered) != len(entries):
+            logger.info(
+                "Excluded %d episode hashes from frozen manifest",
+                len(entries) - len(filtered),
+            )
+        return filtered
+
+    def _resolve_local_episode_paths(
+        self, entries: list[tuple[str, str]]
+    ) -> tuple[list[tuple[Path, str]], list[str]]:
+        local_episode_paths: list[tuple[Path, str]] = []
+        missing: list[str] = []
+        for _, episode_hash in entries:
+            local_path = self._local_episode_path(self.folder_path, episode_hash)
+            if not local_path.is_dir():
+                missing.append(episode_hash)
+                continue
+            local_episode_paths.append((local_path, episode_hash))
+        return local_episode_paths, missing
+
     def resolve(
         self,
         filters: dict | None = None,
@@ -714,40 +746,72 @@ class ManifestEpisodeResolver(EpisodeResolver):
                 self.manifest_path,
             )
 
-        entries = self._load_manifest_entries()
-        if self.max_episodes is not None and self.max_episodes > 0:
-            entries = entries[: self.max_episodes]
+        entries = self._apply_manifest_filters(self._load_manifest_entries())
         logger.info(
             "Loaded %d frozen manifest episodes from %s",
             len(entries),
             self.manifest_path,
         )
+        if not entries:
+            raise ValueError(
+                f"No manifest episodes available after exclusions: {self.manifest_path}"
+            )
 
         self.folder_path.mkdir(parents=True, exist_ok=True)
 
-        if self.sync_missing:
+        target_episodes = len(entries)
+        if self.max_episodes is not None and self.max_episodes > 0:
+            target_episodes = min(self.max_episodes, len(entries))
+
+        if not self.sync_missing:
+            local_episode_paths, missing = self._resolve_local_episode_paths(
+                entries[:target_episodes]
+            )
+            if missing:
+                raise FileNotFoundError(
+                    "Frozen manifest references episodes missing from local cache: "
+                    f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+                )
+            return self._build_zarr_datasets(local_episode_paths)
+
+        resolved_entries: list[tuple[Path, str]] = []
+        unavailable: list[str] = []
+        cursor = 0
+        while cursor < len(entries) and len(resolved_entries) < target_episodes:
+            batch_size = target_episodes - len(resolved_entries)
+            batch = entries[cursor : cursor + batch_size]
+            cursor += len(batch)
+            if not batch:
+                break
+
             S3EpisodeResolver._sync_s3_to_local(
                 bucket_name=self.bucket_name,
-                s3_paths=entries,
+                s3_paths=batch,
                 local_dir=self.folder_path,
             )
+            local_episode_paths, missing = self._resolve_local_episode_paths(batch)
+            resolved_entries.extend(local_episode_paths)
+            unavailable.extend(missing)
 
-        local_episode_paths = []
-        missing = []
-        for _, episode_hash in entries:
-            local_path = self._local_episode_path(self.folder_path, episode_hash)
-            if not local_path.is_dir():
-                missing.append(episode_hash)
-                continue
-            local_episode_paths.append((local_path, episode_hash))
-
-        if missing:
+        if len(resolved_entries) < target_episodes:
             raise FileNotFoundError(
-                "Frozen manifest references episodes missing from local cache: "
-                f"{missing[:10]}{'...' if len(missing) > 10 else ''}"
+                "Frozen manifest could only resolve "
+                f"{len(resolved_entries)}/{target_episodes} requested episodes after "
+                f"syncing from {self.manifest_path}. Unavailable hashes: "
+                f"{unavailable[:10]}{'...' if len(unavailable) > 10 else ''}"
             )
 
-        return self._build_zarr_datasets(local_episode_paths)
+        if unavailable:
+            logger.warning(
+                "Skipped %d unavailable frozen manifest episodes while resolving %d "
+                "requested episodes from %s. First missing hashes: %s",
+                len(unavailable),
+                target_episodes,
+                self.manifest_path,
+                unavailable[:10],
+            )
+
+        return self._build_zarr_datasets(resolved_entries)
 
 
 class MultiDataset(torch.utils.data.Dataset):
