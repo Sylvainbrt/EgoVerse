@@ -287,12 +287,39 @@ class S3EpisodeResolver(EpisodeResolver):
         filters = dict(filters) if filters is not None else {}
         engine = create_default_engine()
         df = episode_table_to_df(engine)
-        series = pd.Series(filters)
-        print(df["robot_name"].unique())  # add this line temporarily
-        output = df.loc[
-            (df[list(filters)] == series).all(axis=1),
-            ["zarr_processed_path", "episode_hash"],
-        ]
+        if df.empty:
+            logger.warning("Episode table is empty after SQL query.")
+            return []
+
+        mask = pd.Series(True, index=df.index)
+        for key, value in filters.items():
+            if key == "robot_name":
+                candidate_cols = [
+                    col
+                    for col in ("robot_name", "robot_type", "embodiment")
+                    if col in df.columns
+                ]
+                if not candidate_cols:
+                    raise KeyError(
+                        "Could not apply filter 'robot_name': none of "
+                        "'robot_name', 'robot_type', or 'embodiment' exist in the "
+                        f"episode table columns {list(df.columns)}"
+                    )
+                column_mask = pd.Series(False, index=df.index)
+                for col in candidate_cols:
+                    column_mask |= df[col] == value
+                mask &= column_mask
+            elif key == "is_deleted" and key not in df.columns:
+                mask &= bool(value) is False
+            else:
+                if key not in df.columns:
+                    raise KeyError(
+                        f"Could not apply filter '{key}': column not found in "
+                        f"episode table columns {list(df.columns)}"
+                    )
+                mask &= df[key] == value
+
+        output = df.loc[mask, ["zarr_processed_path", "episode_hash"]]
         before_len = len(output)
 
         if debug:

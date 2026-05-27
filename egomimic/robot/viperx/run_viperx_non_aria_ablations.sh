@@ -9,6 +9,7 @@ SCALE_CACHE_DIR="${SCALE_CACHE_DIR:-/tmp/scale_zarr_cache}"
 WANDB_LOGGER="${WANDB_LOGGER:-wandb}"
 TRAINER="${TRAINER:-ddp}"
 RUN_NAME="${RUN_NAME:-viperx_ablation}"
+START_AT="${START_AT:-1}"
 
 mkdir -p "${SCALE_CACHE_DIR}"
 
@@ -38,27 +39,33 @@ run_training() {
     "$@"
 }
 
-run_training \
-  robot_only_local \
-  data=viperx_local \
-  model=hpt_bc_flow_viperx
+if [[ "${START_AT}" -le 1 ]]; then
+  run_training \
+    robot_only_local \
+    data=viperx_local \
+    model=hpt_bc_flow_viperx
+fi
 
-run_training \
-  robot_plus_egoverse_cached_500 \
-  data=cotrain_viperx_scale \
-  model=hpt_cotrain_viperx_scale \
-  trainer.strategy=ddp_find_unused_parameters_true \
-  data.train_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
-  data.valid_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
-  data.train_datasets.scale_bimanual.resolver.max_episodes=500 \
-  data.valid_datasets.scale_bimanual.resolver.max_episodes=500
+if [[ "${START_AT}" -le 2 ]]; then
+  run_training \
+    robot_plus_egoverse_cached_500 \
+    data=cotrain_viperx_scale \
+    model=hpt_cotrain_viperx_scale \
+    trainer.strategy=ddp_find_unused_parameters_true \
+    data.train_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
+    data.valid_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
+    data.train_datasets.scale_bimanual.resolver.max_episodes=500 \
+    data.valid_datasets.scale_bimanual.resolver.max_episodes=500
+fi
 
-run_training \
-  robot_plus_egoverse_cached_2000 \
-  data=cotrain_viperx_scale \
-  model=hpt_cotrain_viperx_scale \
-  trainer.strategy=ddp_find_unused_parameters_true \
-  data.train_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
-  data.valid_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
-  data.train_datasets.scale_bimanual.resolver.max_episodes=2000 \
-  data.valid_datasets.scale_bimanual.resolver.max_episodes=2000
+if [[ "${START_AT}" -le 3 ]]; then
+  run_training \
+    robot_plus_egoverse_cached_2000 \
+    data=cotrain_viperx_scale \
+    model=hpt_cotrain_viperx_scale \
+    trainer.strategy=ddp_find_unused_parameters_true \
+    data.train_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
+    data.valid_datasets.scale_bimanual.resolver.folder_path="${SCALE_CACHE_DIR}" \
+    data.train_datasets.scale_bimanual.resolver.max_episodes=2000 \
+    data.valid_datasets.scale_bimanual.resolver.max_episodes=2000
+fi
