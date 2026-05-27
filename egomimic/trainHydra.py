@@ -162,7 +162,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
 
     if os.environ.get("EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS") is not None:
-        cfg.trainer.reload_dataloaders_every_n_epochs = 1
+        OmegaConf.update(
+            cfg,
+            "trainer.reload_dataloaders_every_n_epochs",
+            1,
+            force_add=True,
+        )
         log.info(
             "Enabled trainer.reload_dataloaders_every_n_epochs=1 because "
             "EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS is set."

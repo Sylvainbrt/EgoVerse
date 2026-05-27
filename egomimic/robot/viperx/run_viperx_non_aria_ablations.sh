@@ -8,6 +8,7 @@ ROBOT_DATA_DIR="${ROBOT_DATA_DIR:-/data/sybeuret/remote_data_lerobot/egoverse_da
 SCALE_CACHE_DIR="${SCALE_CACHE_DIR:-/tmp/scale_zarr_cache}"
 SCALE_MANIFEST_PATH="${SCALE_MANIFEST_PATH:-}"
 SCALE_MANIFEST_LOCAL_ONLY="${SCALE_MANIFEST_LOCAL_ONLY:-0}"
+SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS="${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS:-100.0}"
 WANDB_LOGGER="${WANDB_LOGGER:-wandb}"
 TRAINER="${TRAINER:-ddp}"
 RUN_NAME="${RUN_NAME:-viperx_ablation}"
@@ -46,9 +47,11 @@ run_training() {
   echo "EgoVerse root: ${EGOVERSE_ROOT}"
   echo "Robot data: ${ROBOT_DATA_DIR}"
   echo "Scale cache: ${SCALE_CACHE_DIR}"
+  echo "Scale auto-exclude max abs: ${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}"
   echo "============================================================"
   echo
 
+  EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS="${EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS:-${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}}" \
   python3 egomimic/trainHydra.py \
     --config-name=train \
     logger="${WANDB_LOGGER}" \

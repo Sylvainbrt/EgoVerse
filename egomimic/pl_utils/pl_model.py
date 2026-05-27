@@ -53,6 +53,12 @@ class ModelWrapper(LightningModule):
     def video_dir(self):
         return os.path.join(self.root_dir(), "videos")
 
+    def _is_global_zero(self) -> bool:
+        trainer = getattr(self, "_trainer", None)
+        if trainer is None:
+            return True
+        return bool(getattr(trainer, "is_global_zero", True))
+
     def _debug_spike_threshold(self):
         value = os.environ.get("EGOVERSE_DEBUG_LOSS_THRESHOLD")
         if value is None:
@@ -60,7 +66,7 @@ class ModelWrapper(LightningModule):
         try:
             return float(value)
         except ValueError:
-            if self.trainer.is_global_zero:
+            if self._is_global_zero():
                 print(
                     f"[LOSS_SPIKE_DEBUG] invalid EGOVERSE_DEBUG_LOSS_THRESHOLD={value!r}",
                     flush=True,
@@ -74,13 +80,127 @@ class ModelWrapper(LightningModule):
         try:
             return float(value)
         except ValueError:
-            if self.trainer.is_global_zero:
+            if self._is_global_zero():
                 print(
                     "[AUTO_EXCLUDE_QUEUE] "
                     f"invalid EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS={value!r}",
                     flush=True,
                 )
             return None
+
+    def _detect_bad_scale_samples(self, raw_batch):
+        threshold = self._auto_exclude_action_max_abs_threshold()
+        if threshold is None:
+            return None
+
+        domain_name = "scale_bimanual"
+        domain_batch = raw_batch.get(domain_name)
+        if not isinstance(domain_batch, dict):
+            return None
+
+        actions = domain_batch.get("actions_cartesian")
+        episode_hashes = domain_batch.get("metadata.episode_hash")
+        if not isinstance(actions, torch.Tensor) or episode_hashes is None:
+            return None
+
+        if isinstance(episode_hashes, torch.Tensor):
+            episode_hashes = episode_hashes.detach().cpu().tolist()
+        elif isinstance(episode_hashes, tuple):
+            episode_hashes = list(episode_hashes)
+        else:
+            episode_hashes = list(episode_hashes)
+
+        flat = actions.detach().float().reshape(actions.shape[0], -1).cpu()
+        finite = torch.isfinite(flat).all(dim=1)
+        max_abs = flat.abs().amax(dim=1)
+        keep_mask = finite & (max_abs < threshold)
+
+        bad_hashes = set()
+        details = []
+        for i, episode_hash in enumerate(episode_hashes[: len(max_abs)]):
+            if keep_mask[i]:
+                continue
+            episode_hash = str(episode_hash)
+            bad_hashes.add(episode_hash)
+            details.append(
+                {
+                    "batch_i": i,
+                    "episode_hash": episode_hash,
+                    "max_abs": float(max_abs[i]),
+                    "finite": bool(finite[i]),
+                }
+            )
+
+        return {
+            "dataset_name": domain_name,
+            "threshold": threshold,
+            "keep_mask": keep_mask,
+            "bad_hashes": bad_hashes,
+            "details": details,
+            "batch_size": int(actions.shape[0]),
+        }
+
+    @staticmethod
+    def _filter_batched_value(value, keep_indices, batch_size: int):
+        keep_list = keep_indices.tolist()
+
+        if isinstance(value, torch.Tensor) and value.shape[:1] == (batch_size,):
+            return value.index_select(0, keep_indices.to(value.device))
+
+        if isinstance(value, np.ndarray) and value.shape[:1] == (batch_size,):
+            return value[keep_list]
+
+        if isinstance(value, list) and len(value) == batch_size:
+            return [value[i] for i in keep_list]
+
+        if isinstance(value, tuple) and len(value) == batch_size:
+            return tuple(value[i] for i in keep_list)
+
+        return value
+
+    def _filter_domain_batch(self, domain_batch, keep_mask: torch.Tensor):
+        keep_indices = torch.nonzero(keep_mask, as_tuple=False).flatten()
+        batch_size = int(keep_mask.numel())
+        return {
+            key: self._filter_batched_value(value, keep_indices, batch_size)
+            for key, value in domain_batch.items()
+        }
+
+    def _auto_exclude_and_filter_raw_batch(self, raw_batch):
+        detection = self._detect_bad_scale_samples(raw_batch)
+        if detection is None or not detection["bad_hashes"]:
+            return raw_batch
+
+        dataset_name = detection["dataset_name"]
+        pending = self.auto_exclusion_pending.setdefault(dataset_name, set())
+        pending.update(detection["bad_hashes"])
+
+        filtered_batch = dict(raw_batch)
+        keep_mask = detection["keep_mask"]
+        dropped = detection["batch_size"] - int(keep_mask.sum().item())
+        kept = int(keep_mask.sum().item())
+
+        if kept > 0:
+            filtered_batch[dataset_name] = self._filter_domain_batch(
+                raw_batch[dataset_name], keep_mask
+            )
+        else:
+            filtered_batch.pop(dataset_name, None)
+
+        if self._is_global_zero():
+            print(
+                "[AUTO_EXCLUDE_DROP] "
+                f"step={self.global_step} "
+                f"epoch={self.current_epoch} "
+                f"dataset={dataset_name} "
+                f"threshold={detection['threshold']} "
+                f"kept={kept} "
+                f"dropped={dropped} "
+                f"details={detection['details']}",
+                flush=True,
+            )
+
+        return filtered_batch
 
     def _summarize_batch_sources(self, raw_batch):
         summary = {}
@@ -129,7 +249,7 @@ class ModelWrapper(LightningModule):
 
     def _maybe_log_loss_spike_sources(self, raw_batch, losses):
         threshold = self._debug_spike_threshold()
-        if threshold is None or not self.trainer.is_global_zero:
+        if threshold is None or not self._is_global_zero():
             return
 
         spike_losses = {}
@@ -153,61 +273,24 @@ class ModelWrapper(LightningModule):
         )
 
     def _maybe_queue_auto_excluded_episodes(self, raw_batch):
-        threshold = self._auto_exclude_action_max_abs_threshold()
-        if threshold is None:
+        detection = self._detect_bad_scale_samples(raw_batch)
+        if detection is None or not detection["bad_hashes"]:
             return
 
-        domain_name = "scale_bimanual"
-        domain_batch = raw_batch.get(domain_name)
-        if not isinstance(domain_batch, dict):
-            return
+        pending = self.auto_exclusion_pending.setdefault(
+            detection["dataset_name"], set()
+        )
+        new_hashes = sorted(detection["bad_hashes"] - pending)
+        pending.update(detection["bad_hashes"])
 
-        actions = domain_batch.get("actions_cartesian")
-        episode_hashes = domain_batch.get("metadata.episode_hash")
-        if not isinstance(actions, torch.Tensor) or episode_hashes is None:
-            return
-
-        if isinstance(episode_hashes, torch.Tensor):
-            episode_hashes = episode_hashes.detach().cpu().tolist()
-        elif isinstance(episode_hashes, tuple):
-            episode_hashes = list(episode_hashes)
-        else:
-            episode_hashes = list(episode_hashes)
-
-        flat = actions.detach().float().reshape(actions.shape[0], -1).cpu()
-        finite = torch.isfinite(flat).all(dim=1).tolist()
-        max_abs = flat.abs().amax(dim=1).tolist()
-
-        bad_hashes = set()
-        details = []
-        for i, episode_hash in enumerate(episode_hashes[: len(max_abs)]):
-            if (not finite[i]) or max_abs[i] >= threshold:
-                episode_hash = str(episode_hash)
-                bad_hashes.add(episode_hash)
-                details.append(
-                    {
-                        "batch_i": i,
-                        "episode_hash": episode_hash,
-                        "max_abs": float(max_abs[i]),
-                        "finite": bool(finite[i]),
-                    }
-                )
-
-        if not bad_hashes:
-            return
-
-        pending = self.auto_exclusion_pending.setdefault(domain_name, set())
-        new_hashes = sorted(bad_hashes - pending)
-        pending.update(bad_hashes)
-
-        if new_hashes and self.trainer.is_global_zero:
+        if new_hashes and self._is_global_zero():
             print(
                 "[AUTO_EXCLUDE_QUEUE] "
                 f"step={self.global_step} "
                 f"epoch={self.current_epoch} "
-                f"dataset={domain_name} "
-                f"threshold={threshold} "
-                f"details={details}",
+                f"dataset={detection['dataset_name']} "
+                f"threshold={detection['threshold']} "
+                f"details={detection['details']}",
                 flush=True,
             )
 
@@ -236,7 +319,7 @@ class ModelWrapper(LightningModule):
         return {dataset_name: sorted(hashes) for dataset_name, hashes in merged.items()}
 
     def _persist_auto_excluded_hashes(self, merged):
-        if not merged or not self.trainer.is_global_zero:
+        if not merged or not self._is_global_zero():
             return
 
         output_path = os.environ.get(
@@ -267,12 +350,53 @@ class ModelWrapper(LightningModule):
                 flush=True,
             )
 
+    def _maybe_rescale_action_loss_for_active_domains(
+        self, active_domain_count: int, losses
+    ):
+        if "action_loss" not in losses:
+            return losses
+
+        configured_domains = getattr(self.model, "domains", None)
+        if not configured_domains:
+            return losses
+
+        configured_domain_count = len(configured_domains)
+        if active_domain_count <= 0 or active_domain_count >= configured_domain_count:
+            return losses
+
+        scale = configured_domain_count / active_domain_count
+        losses["action_loss"] = losses["action_loss"] * scale
+
+        if self._is_global_zero():
+            print(
+                "[AUTO_EXCLUDE_REWEIGHT] "
+                f"step={self.global_step} "
+                f"epoch={self.current_epoch} "
+                f"active_domains={active_domain_count} "
+                f"configured_domains={configured_domain_count} "
+                f"scale={scale:.4f}",
+                flush=True,
+            )
+
+        return losses
+
     # batch is now a dict, handle on model side
     def training_step(self, batch, batch_idx):
         self.train()
-        raw_batch = batch
+        raw_batch = self._auto_exclude_and_filter_raw_batch(batch)
+        if not raw_batch:
+            if self._is_global_zero():
+                print(
+                    "[AUTO_EXCLUDE_DROP] "
+                    f"step={self.global_step} "
+                    f"epoch={self.current_epoch} "
+                    "all domains dropped for this step",
+                    flush=True,
+                )
+            return torch.zeros((), device=self.device, requires_grad=True)
+
         loss_dicts = []
-        batch = self.model.process_batch_for_training(batch)
+        batch = self.model.process_batch_for_training(raw_batch)
         predictions = self.model.forward_training(batch)
         losses = self.model.compute_losses(predictions, batch)
         loss_dicts.append(losses)
@@ -284,13 +408,15 @@ class ModelWrapper(LightningModule):
                 torch.stack([loss_dict[key] for loss_dict in loss_dicts])
             )
 
+        losses = self._maybe_rescale_action_loss_for_active_domains(len(batch), losses)
+
         if (
             self.debug_loss_spike
             and random.random() < self.debug_loss_spike_prob
             and self.global_step > 100
         ):
             losses["action_loss"] = losses["action_loss"] * self.debug_loss_spike_factor
-            if self.trainer.is_global_zero:
+            if self._is_global_zero():
                 print(
                     "[LOSS_SPIKE] "
                     f"step={self.global_step} "
@@ -299,7 +425,6 @@ class ModelWrapper(LightningModule):
                 )
 
         self._maybe_log_loss_spike_sources(raw_batch, losses)
-        self._maybe_queue_auto_excluded_episodes(raw_batch)
 
         info = {}
         info["losses"] = TensorUtils.detach(losses)
@@ -325,7 +450,7 @@ class ModelWrapper(LightningModule):
                 info["policy_grad_norms_mad_flag"] = float(grad_norm_val > threshold)
                 if grad_norm_val > threshold:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=median)
-                    if self.trainer.is_global_zero:
+                    if self._is_global_zero():
                         print(
                             "[GRAD_NORM_SPIKE] "
                             f"step={self.global_step} "
@@ -355,7 +480,7 @@ class ModelWrapper(LightningModule):
     def on_validation_start(self):
         self.model.device = self.device
 
-        if self.trainer.is_global_zero:
+        if self._is_global_zero():
             os.makedirs(
                 os.path.join(self.video_dir(), f"epoch_{self.trainer.current_epoch}"),
                 exist_ok=True,
@@ -499,7 +624,7 @@ class ModelWrapper(LightningModule):
                     )
                 applied = datamodule.apply_pending_exclusions()
                 self._persist_auto_excluded_hashes(merged)
-                if self.trainer.is_global_zero:
+                if self._is_global_zero():
                     print(
                         "[AUTO_EXCLUDE_APPLY] "
                         f"epoch={self.current_epoch} "

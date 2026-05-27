@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -169,3 +170,45 @@ def test_manifest_resolver_local_only_keeps_first_requested_entries_strict(
 
     with pytest.raises(FileNotFoundError, match="missing_a"):
         resolver.resolve()
+
+
+def test_s3_sync_skips_remote_episodes_marked_unavailable(
+    monkeypatch, tmp_path
+) -> None:
+    zdm.S3EpisodeResolver._known_unavailable_remote_episodes = set()
+    zdm.S3EpisodeResolver._mark_remote_episodes_unavailable(
+        "rldb",
+        [("s3://rldb/processed_v3/scale/missing_a.zarr/", "missing_a")],
+    )
+
+    monkeypatch.setattr(
+        zdm.S3EpisodeResolver,
+        "_episode_already_present",
+        classmethod(lambda cls, local_dir, episode_hash: False),
+    )
+    monkeypatch.setattr(zdm, "load_env", lambda: None)
+    monkeypatch.setenv("R2_ENDPOINT_URL", "https://example.invalid")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "key")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "secret")
+
+    captured = {}
+
+    def fake_run(cmd, check, env):
+        batch_path = Path(cmd[-1])
+        captured["lines"] = batch_path.read_text().splitlines()
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(zdm.subprocess, "run", fake_run)
+
+    zdm.S3EpisodeResolver._sync_s3_to_local(
+        bucket_name="rldb",
+        s3_paths=[
+            ("s3://rldb/processed_v3/scale/missing_a.zarr/", "missing_a"),
+            ("s3://rldb/processed_v3/scale/present_b.zarr/", "present_b"),
+        ],
+        local_dir=tmp_path / "cache",
+    )
+
+    assert captured["lines"] == [
+        f'sync "s3://rldb/processed_v3/scale/present_b.zarr/*" "{tmp_path / "cache" / "present_b"}/"'
+    ]

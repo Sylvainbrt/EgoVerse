@@ -189,6 +189,8 @@ class S3EpisodeResolver(EpisodeResolver):
     Resolves episodes via SQL table and optionally syncs from S3.
     """
 
+    _known_unavailable_remote_episodes: set[tuple[str, str, str]] = set()
+
     def __init__(
         self,
         folder_path: Path,
@@ -210,6 +212,34 @@ class S3EpisodeResolver(EpisodeResolver):
         self.episode_seed = episode_seed
         self.exclude_episode_hashes = exclude_episode_hashes or []
         super().__init__(folder_path, key_map=key_map, transform_list=transform_list)
+
+    @classmethod
+    def _remote_episode_key(
+        cls, bucket_name: str, processed_path: str, episode_hash: str
+    ) -> tuple[str, str, str]:
+        return (
+            bucket_name,
+            cls._normalize_s3_uri(bucket_name, str(processed_path)),
+            str(episode_hash),
+        )
+
+    @classmethod
+    def _is_remote_episode_known_unavailable(
+        cls, bucket_name: str, processed_path: str, episode_hash: str
+    ) -> bool:
+        return (
+            cls._remote_episode_key(bucket_name, processed_path, episode_hash)
+            in cls._known_unavailable_remote_episodes
+        )
+
+    @classmethod
+    def _mark_remote_episodes_unavailable(
+        cls, bucket_name: str, s3_paths: list[tuple[str, str]]
+    ) -> None:
+        for processed_path, episode_hash in s3_paths:
+            cls._known_unavailable_remote_episodes.add(
+                cls._remote_episode_key(bucket_name, processed_path, episode_hash)
+            )
 
     def resolve(
         self,
@@ -369,14 +399,24 @@ class S3EpisodeResolver(EpisodeResolver):
         # 0) Skip episodes already present locally
         to_sync = []
         already = []
+        known_unavailable = []
         for processed_path, episode_hash in s3_paths:
-            if cls._episode_already_present(local_dir, episode_hash):
+            if cls._is_remote_episode_known_unavailable(
+                bucket_name, processed_path, episode_hash
+            ):
+                known_unavailable.append(episode_hash)
+            elif cls._episode_already_present(local_dir, episode_hash):
                 already.append(episode_hash)
             else:
                 to_sync.append((processed_path, episode_hash))
 
         if already:
             logger.info("Skipping %d episodes already present locally.", len(already))
+        if known_unavailable:
+            logger.info(
+                "Skipping %d episodes previously marked unavailable on remote.",
+                len(known_unavailable),
+            )
 
         if not to_sync:
             logger.info("Nothing to sync from S3 (all episodes already present).")
@@ -792,6 +832,16 @@ class ManifestEpisodeResolver(EpisodeResolver):
             local_episode_paths, missing = self._resolve_local_episode_paths(batch)
             resolved_entries.extend(local_episode_paths)
             unavailable.extend(missing)
+            if missing:
+                missing_set = set(missing)
+                S3EpisodeResolver._mark_remote_episodes_unavailable(
+                    self.bucket_name,
+                    [
+                        (processed_path, episode_hash)
+                        for processed_path, episode_hash in batch
+                        if episode_hash in missing_set
+                    ],
+                )
 
         if len(resolved_entries) < target_episodes:
             raise FileNotFoundError(
