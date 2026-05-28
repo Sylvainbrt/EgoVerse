@@ -18,10 +18,10 @@ train_datasets:
         actions.joints_act: actions_joints
         observation.state: joint_positions
 
-  aria_right_arm:
+  aria_left_arm:
     _target_: egomimic.rldb.utils.FolderRLDBDataset
     folder_path: /data/sybeuret/remote_aria_data/egoverse_data
-    embodiment: aria_right_arm
+    embodiment: aria_left_arm
     mode: train
     camera_keys:
       - observations.images.front_img_1
@@ -50,10 +50,10 @@ valid_datasets:
         actions.joints_act: actions_joints
         observation.state: joint_positions
 
-  aria_right_arm:
+  aria_left_arm:
     _target_: egomimic.rldb.utils.FolderRLDBDataset
     folder_path: /data/sybeuret/remote_aria_data/egoverse_data
-    embodiment: aria_right_arm
+    embodiment: aria_left_arm
     mode: valid
     camera_keys:
       - observations.images.front_img_1
@@ -68,7 +68,7 @@ train_dataloader_params:
   viperx_right_arm:
     batch_size: 8
     num_workers: 4
-  aria_right_arm:
+  aria_left_arm:
     batch_size: 8
     num_workers: 4
 
@@ -76,6 +76,6 @@ valid_dataloader_params:
   viperx_right_arm:
     batch_size: 8
     num_workers: 4
-  aria_right_arm:
+  aria_left_arm:
     batch_size: 8
     num_workers: 4

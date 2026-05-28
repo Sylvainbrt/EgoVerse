@@ -1,4 +1,6 @@
 import argparse
+import bisect
+import csv
 import ctypes
 import gc
 import glob
@@ -51,6 +53,51 @@ from egomimic.utils.egomimicUtils import (
 )
 
 _root = psutil.Process(os.getpid())
+
+
+def _load_valid_hand_timestamps_us(hand_tracking_results_path):
+    valid = {"left": [], "right": []}
+    with open(hand_tracking_results_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            ts_us = int(row["tracking_timestamp_us"])
+            try:
+                left_conf = float(row.get("left_tracking_confidence", -1))
+            except Exception:
+                left_conf = -1
+            try:
+                right_conf = float(row.get("right_tracking_confidence", -1))
+            except Exception:
+                right_conf = -1
+            if left_conf > 0:
+                valid["left"].append(ts_us)
+            if right_conf > 0:
+                valid["right"].append(ts_us)
+    return valid
+
+
+def _find_nearest_valid_timestamp_ns(
+    valid_timestamps_us, target_timestamp_ns, max_delta_ms
+):
+    if not valid_timestamps_us:
+        return None
+    target_us = target_timestamp_ns / 1000.0
+    idx = bisect.bisect_left(valid_timestamps_us, target_us)
+    best = None
+    best_delta = None
+    for cand_idx in (idx - 1, idx):
+        if 0 <= cand_idx < len(valid_timestamps_us):
+            cand_us = valid_timestamps_us[cand_idx]
+            delta_us = abs(cand_us - target_us)
+            if best_delta is None or delta_us < best_delta:
+                best_delta = delta_us
+                best = cand_us * 1000
+    if best is None:
+        return None
+    if best_delta is not None and best_delta <= max_delta_ms * 1000.0:
+        return int(best)
+    return None
+
 
 # ==============================================================================
 # HUGGINGFACE VALUE PATCH
@@ -522,7 +569,12 @@ class AriaVRSExtractor:
 
     @staticmethod
     def process_episode(
-        episode_path, arm, prestack=False, low_res=False, benchmark=False
+        episode_path,
+        arm,
+        prestack=False,
+        low_res=False,
+        benchmark=False,
+        hand_time_tolerance_ms=100.0,
     ):
         """
         Extracts all feature keys from a given episode and returns as a dictionary
@@ -564,6 +616,9 @@ class AriaVRSExtractor:
         hand_tracking_results = mps.hand_tracking.read_hand_tracking_results(
             hand_tracking_results_path
         )
+        valid_hand_timestamps_us = _load_valid_hand_timestamps_us(
+            hand_tracking_results_path
+        )
 
         time_domain: TimeDomain = TimeDomain.DEVICE_TIME
 
@@ -594,6 +649,8 @@ class AriaVRSExtractor:
             arm=arm,
             stream_timestamps_ns=stream_timestamps_ns,
             hand_tracking_results=hand_tracking_results,
+            valid_hand_timestamps_us=valid_hand_timestamps_us,
+            hand_time_tolerance_ms=hand_time_tolerance_ms,
         )
 
         # rgb_camera
@@ -635,6 +692,8 @@ class AriaVRSExtractor:
             prestack=prestack,
             hand_tracking_results=hand_tracking_results,
             benchmark=benchmark,
+            valid_hand_timestamps_us=valid_hand_timestamps_us,
+            hand_time_tolerance_ms=hand_time_tolerance_ms,
         )
 
         print(f"[DEBUG] LENGTH BEFORE CLEANING: {len(actions)}")
@@ -672,11 +731,13 @@ class AriaVRSExtractor:
         transform: np.array,
         arm: str,
         hand_tracking_results,
+        valid_hand_timestamps_us,
         HORIZON=HORIZON_DEFAULT,
         STEP=STEP_DEFAULT,
         prestack=False,
         no_rot=False,
         benchmark=False,
+        hand_time_tolerance_ms=100.0,
     ):
         """
         Calculates actions using stable reference frames
@@ -721,8 +782,35 @@ class AriaVRSExtractor:
                 sample_timestamp_ns = stream_timestamps_ns["rgb"][
                     int(t + offset * STEP)
                 ]
-                hand_tracking_result_offset = get_nearest_hand_tracking_result(
-                    hand_tracking_results, sample_timestamp_ns
+                if arm == "left":
+                    valid_ts_ns = _find_nearest_valid_timestamp_ns(
+                        valid_hand_timestamps_us["left"],
+                        sample_timestamp_ns,
+                        hand_time_tolerance_ms,
+                    )
+                elif arm == "right":
+                    valid_ts_ns = _find_nearest_valid_timestamp_ns(
+                        valid_hand_timestamps_us["right"],
+                        sample_timestamp_ns,
+                        hand_time_tolerance_ms,
+                    )
+                else:
+                    left_ts_ns = _find_nearest_valid_timestamp_ns(
+                        valid_hand_timestamps_us["left"],
+                        sample_timestamp_ns,
+                        hand_time_tolerance_ms,
+                    )
+                    right_ts_ns = _find_nearest_valid_timestamp_ns(
+                        valid_hand_timestamps_us["right"],
+                        sample_timestamp_ns,
+                        hand_time_tolerance_ms,
+                    )
+                    valid_ts_ns = left_ts_ns if left_ts_ns is not None else right_ts_ns
+
+                hand_tracking_result_offset = (
+                    get_nearest_hand_tracking_result(hand_tracking_results, valid_ts_ns)
+                    if valid_ts_ns is not None
+                    else None
                 )
 
                 if hand_tracking_result_offset is None:
@@ -842,13 +930,17 @@ class AriaVRSExtractor:
         actions, pose, images : tuple of np.array
             cleaned data
         """
-        bad_data_mask = np.any(pose >= 1e8, axis=1)
+        bad_data_mask = (~np.isfinite(pose)).any(axis=1) | np.any(
+            np.abs(pose) >= 1e8, axis=1
+        )
 
         actions = actions[~bad_data_mask]
         pose = pose[~bad_data_mask]
         images = images[~bad_data_mask]
 
-        bad_data_mask = np.any(actions >= 1e8, axis=(1, 2))
+        bad_data_mask = (~np.isfinite(actions)).any(axis=(1, 2)) | np.any(
+            np.abs(actions) >= 1e8, axis=(1, 2)
+        )
 
         actions = actions[~bad_data_mask]
         pose = pose[~bad_data_mask]
@@ -988,9 +1080,11 @@ class AriaVRSExtractor:
         arm: str,
         stream_timestamps_ns: dict,
         hand_tracking_results,
+        valid_hand_timestamps_us,
         no_rot=False,
         HORIZON=HORIZON_DEFAULT,
         STEP=STEP_DEFAULT,
+        hand_time_tolerance_ms=100.0,
     ):
         """
         Get EE Pose from VRS
@@ -1017,9 +1111,42 @@ class AriaVRSExtractor:
 
         for t in range(frame_length - int(HORIZON * STEP)):
             query_timestamp = stream_timestamps_ns["rgb"][t]
-            hand_tracking_result_t = get_nearest_hand_tracking_result(
-                hand_tracking_results, query_timestamp
+            if arm == "left":
+                valid_ts_ns = _find_nearest_valid_timestamp_ns(
+                    valid_hand_timestamps_us["left"],
+                    query_timestamp,
+                    hand_time_tolerance_ms,
+                )
+            elif arm == "right":
+                valid_ts_ns = _find_nearest_valid_timestamp_ns(
+                    valid_hand_timestamps_us["right"],
+                    query_timestamp,
+                    hand_time_tolerance_ms,
+                )
+            else:
+                left_ts_ns = _find_nearest_valid_timestamp_ns(
+                    valid_hand_timestamps_us["left"],
+                    query_timestamp,
+                    hand_time_tolerance_ms,
+                )
+                right_ts_ns = _find_nearest_valid_timestamp_ns(
+                    valid_hand_timestamps_us["right"],
+                    query_timestamp,
+                    hand_time_tolerance_ms,
+                )
+                valid_ts_ns = left_ts_ns if left_ts_ns is not None else right_ts_ns
+
+            hand_tracking_result_t = (
+                get_nearest_hand_tracking_result(hand_tracking_results, valid_ts_ns)
+                if valid_ts_ns is not None
+                else None
             )
+            if hand_tracking_result_t is None:
+                if arm == "bimanual":
+                    ee_pose.append(np.full(12, 1e9))
+                else:
+                    ee_pose.append(np.full(6, 1e9))
+                continue
             right_confidence = getattr(
                 getattr(hand_tracking_result_t, "right_hand", None), "confidence", -1
             )
@@ -1202,9 +1329,14 @@ class AriaVRSExtractor:
         arm: str,
         prestack: bool = False,
         benchmark: bool = False,
+        hand_time_tolerance_ms: float = 100.0,
     ):
         episode_feats = AriaVRSExtractor.process_episode(
-            episode_path, arm=arm, prestack=prestack, benchmark=benchmark
+            episode_path,
+            arm=arm,
+            prestack=prestack,
+            benchmark=benchmark,
+            hand_time_tolerance_ms=hand_time_tolerance_ms,
         )
         try:
             num_frames = next(iter(episode_feats["observations"].values())).shape[0]
@@ -1351,6 +1483,7 @@ class DatasetConverter:
         prestack: bool = False,
         debug: bool = False,
         benchmark: bool = False,
+        hand_time_tolerance_ms: float = 100.0,
     ):
         self.raw_path = raw_path if isinstance(raw_path, Path) else Path(raw_path)
         self.dataset_repo_id = dataset_repo_id
@@ -1362,6 +1495,7 @@ class DatasetConverter:
         self.encode_as_videos = encode_as_videos
         self.prestack = prestack
         self.benchmark = benchmark
+        self.hand_time_tolerance_ms = hand_time_tolerance_ms
         if self.benchmark:
             print(
                 "Benchmark mode enabled. This will plot the RAM usage of each section."
@@ -1385,6 +1519,7 @@ class DatasetConverter:
         self.logger.info(f"Image compressed: {self.image_compressed}")
         self.logger.info(f"Encoding images as videos: {self.encode_as_videos}")
         self.logger.info(f"Prestack: {self.prestack}")
+        self.logger.info(f"Hand time tolerance (ms): {self.hand_time_tolerance_ms}")
         self.logger.info(f"#writer processes: {self.image_writer_processes}")
         self.logger.info(f"#writer threads: {self.image_writer_threads}")
 
@@ -1407,6 +1542,7 @@ class DatasetConverter:
                 arm=self.arm,
                 prestack=self.prestack,
                 benchmark=self.benchmark,
+                hand_time_tolerance_ms=self.hand_time_tolerance_ms,
             )
 
         if self.arm == "bimanual":
@@ -1627,15 +1763,15 @@ class DatasetConverter:
         # ------------------------------------------
 
         image_frames = []
-        for i, frame in enumerate(
-            AriaVRSExtractor.iter_episode_frames(
-                episode_path,
-                self.features,
-                self.image_compressed,
-                self.arm,
-                self.prestack,
-                self.benchmark,
-            )
+        frame_count = 0
+        for frame in AriaVRSExtractor.iter_episode_frames(
+            episode_path,
+            self.features,
+            self.image_compressed,
+            self.arm,
+            self.prestack,
+            self.benchmark,
+            self.hand_time_tolerance_ms,
         ):
             # 1. Ensure Task exists
             frame["task"] = task_description
@@ -1643,6 +1779,7 @@ class DatasetConverter:
             # 2. Add Frame
             # Note: No manual buffer modifications needed anymore! The monkey patch catches everything safely.
             self.dataset.add_frame(frame)
+            frame_count += 1
 
             # Store images for preview video if needed
             if (
@@ -1650,6 +1787,12 @@ class DatasetConverter:
                 and "observations.images.front_img_1" in frame
             ):
                 image_frames.append(frame["observations.images.front_img_1"])
+
+        if frame_count == 0:
+            self.logger.warning(
+                f"Skipping empty episode {episode_path}: no valid frames remained after filtering."
+            )
+            return
 
         # Flush and save the episode to parquet
         self.dataset.save_episode()
@@ -1882,6 +2025,12 @@ def argument_parse():
         action="store_true",
         help="Run benchmark mode. Which include printing out the peak RAM usage of each section.",
     )
+    parser.add_argument(
+        "--hand-time-tolerance-ms",
+        type=float,
+        default=100.0,
+        help="Maximum timestamp gap in milliseconds when matching RGB frames to valid Aria hand tracking.",
+    )
 
     args = parser.parse_args()
 
@@ -1915,6 +2064,7 @@ def main(args):
         prestack=args.prestack,
         debug=args.debug,
         benchmark=args.benchmark,
+        hand_time_tolerance_ms=args.hand_time_tolerance_ms,
     )
 
     # Initialize the dataset

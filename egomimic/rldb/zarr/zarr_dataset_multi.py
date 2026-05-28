@@ -473,7 +473,46 @@ class S3EpisodeResolver(EpisodeResolver):
                 str(batch_path),
             ]
             logger.info("Running s5cmd batch (%d lines): %s", len(lines), " ".join(cmd))
-            subprocess.run(cmd, check=True, env=s5cmd_env)
+            result = subprocess.run(
+                cmd,
+                check=False,
+                env=s5cmd_env,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                combined_output = "\n".join(
+                    chunk for chunk in [result.stdout, result.stderr] if chunk
+                )
+                error_lines = [
+                    line.strip()
+                    for line in combined_output.splitlines()
+                    if line.strip() and "error" in line.lower()
+                ]
+                tolerated_missing_markers = [
+                    "no object found",
+                    "object not found",
+                    "key does not exist",
+                ]
+                only_missing_object_errors = bool(error_lines) and all(
+                    any(marker in line.lower() for marker in tolerated_missing_markers)
+                    for line in error_lines
+                )
+                if only_missing_object_errors:
+                    logger.warning(
+                        "s5cmd reported %d missing remote objects while syncing; "
+                        "continuing and letting the resolver drop unavailable "
+                        "episodes. First errors: %s",
+                        len(error_lines),
+                        error_lines[:5],
+                    )
+                else:
+                    raise subprocess.CalledProcessError(
+                        result.returncode,
+                        cmd,
+                        output=result.stdout,
+                        stderr=result.stderr,
+                    )
 
         finally:
             try:
@@ -843,7 +882,7 @@ class ManifestEpisodeResolver(EpisodeResolver):
                     ],
                 )
 
-        if len(resolved_entries) < target_episodes:
+        if len(resolved_entries) < target_episodes and not resolved_entries:
             raise FileNotFoundError(
                 "Frozen manifest could only resolve "
                 f"{len(resolved_entries)}/{target_episodes} requested episodes after "
@@ -851,7 +890,16 @@ class ManifestEpisodeResolver(EpisodeResolver):
                 f"{unavailable[:10]}{'...' if len(unavailable) > 10 else ''}"
             )
 
-        if unavailable:
+        if len(resolved_entries) < target_episodes:
+            logger.warning(
+                "Frozen manifest could only resolve %d/%d requested episodes from %s; "
+                "proceeding with the available subset. First unavailable hashes: %s",
+                len(resolved_entries),
+                target_episodes,
+                self.manifest_path,
+                unavailable[:10],
+            )
+        elif unavailable:
             logger.warning(
                 "Skipped %d unavailable frozen manifest episodes while resolving %d "
                 "requested episodes from %s. First missing hashes: %s",
