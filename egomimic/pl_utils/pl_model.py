@@ -356,6 +356,9 @@ class ModelWrapper(LightningModule):
         if "action_loss" not in losses:
             return losses
 
+        if getattr(self.model, "is_mix_schedule_enabled", lambda: False)():
+            return losses
+
         configured_domains = getattr(self.model, "domains", None)
         if not configured_domains:
             return losses
@@ -397,6 +400,13 @@ class ModelWrapper(LightningModule):
 
         loss_dicts = []
         batch = self.model.process_batch_for_training(raw_batch)
+        self.model.current_epoch = self.current_epoch
+        max_epochs = getattr(getattr(self, "trainer", None), "max_epochs", None)
+        if max_epochs is None or max_epochs <= 0:
+            max_epochs = 1
+        self.model.current_train_progress = float(self.current_epoch) / max(
+            1, int(max_epochs) - 1
+        )
         predictions = self.model.forward_training(batch)
         losses = self.model.compute_losses(predictions, batch)
         loss_dicts.append(losses)

@@ -817,6 +817,7 @@ class HPT(Algo):
         encoder_specs: dict = None,
         domains: list = None,
         auxiliary_ac_keys: dict = {},
+        mix_schedule: dict = None,
         # ---------------------------
         # Pretrained
         # ---------------------------
@@ -842,6 +843,7 @@ class HPT(Algo):
 
         self.pretrained = pretrained
         self.pretrained_checkpoint = pretrained_checkpoint
+        self.mix_schedule = mix_schedule
 
         self.domains = domains.copy()
         self.auxiliary_ac_keys = auxiliary_ac_keys.copy()
@@ -956,6 +958,70 @@ class HPT(Algo):
         self.nets = self.nets.float().to(self.device)
 
         self.training_step = 0
+        self.current_epoch = 0
+        self.current_train_progress = 0.0
+
+    def is_mix_schedule_enabled(self):
+        return bool(self.mix_schedule and self.mix_schedule.get("enabled", False))
+
+    def _get_mix_schedule_coord(self):
+        if not self.is_mix_schedule_enabled():
+            return 0
+
+        unit = self.mix_schedule.get("unit", "epoch")
+        if unit == "epoch":
+            return int(self.current_epoch)
+        if unit == "step":
+            return int(self.training_step)
+        if unit == "progress":
+            return float(self.current_train_progress)
+
+        raise ValueError(f"Unsupported mix schedule unit: {unit}")
+
+    @staticmethod
+    def _eval_piecewise_linear(points, coord):
+        if not points:
+            return 1.0
+
+        parsed_points = sorted((float(x), float(y)) for x, y in points)
+        if coord <= parsed_points[0][0]:
+            return parsed_points[0][1]
+
+        for (x0, y0), (x1, y1) in zip(parsed_points, parsed_points[1:]):
+            if coord <= x1:
+                if x1 == x0:
+                    return y1
+                alpha = (coord - x0) / (x1 - x0)
+                return y0 + alpha * (y1 - y0)
+
+        return parsed_points[-1][1]
+
+    def _get_domain_mix_weight(self, domain_name):
+        if not self.is_mix_schedule_enabled():
+            return 1.0
+
+        domains = self.mix_schedule.get("domains", {})
+        profiles = self.mix_schedule.get("profiles", {})
+        if profiles:
+            profile_name = self.mix_schedule.get("profile", "default")
+            if profile_name not in profiles:
+                raise ValueError(f"Unknown mix schedule profile: {profile_name}")
+            domains = profiles[profile_name].get("domains", domains)
+
+        domain_cfg = domains.get(domain_name, None)
+        if not domain_cfg:
+            return 1.0
+
+        schedule_type = domain_cfg.get("type", "constant")
+        if schedule_type == "constant":
+            return float(domain_cfg.get("value", 1.0))
+        if schedule_type == "piecewise_linear":
+            return self._eval_piecewise_linear(
+                domain_cfg.get("points", []),
+                self._get_mix_schedule_coord(),
+            )
+
+        raise ValueError(f"Unsupported mix schedule type: {schedule_type}")
 
     @override
     def process_batch_for_training(self, batch):
@@ -1403,20 +1469,37 @@ class HPT(Algo):
             ot_weight = 1.0 if self.training_step >= self.ot_warm_start_steps else 0.0
         else:
             bc_weight = 1.0
+        normalize = not self.is_mix_schedule_enabled() or bool(
+            self.mix_schedule.get("normalize", True)
+        )
+        total_mix_weight = 0.0
 
         for embodiment_id, _batch in batch.items():
             embodiment_name = get_embodiment(embodiment_id).lower()
             bc_loss = predictions[f"{embodiment_name}_loss"]
-            scaled_bc_loss = bc_weight * bc_loss
+            mix_weight = self._get_domain_mix_weight(embodiment_name)
+            scaled_bc_loss = bc_weight * mix_weight * bc_loss
             total_action_loss += scaled_bc_loss
             loss_dict[f"{embodiment_name}_loss"] = bc_loss  # for logging
+            if self.is_mix_schedule_enabled():
+                loss_dict[f"{embodiment_name}_mix_weight"] = torch.tensor(
+                    mix_weight,
+                    device=self.device,
+                    dtype=bc_loss.dtype,
+                )
+            total_mix_weight += mix_weight
 
         if self.ot:
             loss_dict["ot_loss"] = predictions["ot_loss"]
             loss_dict["avg_feature_distance"] = predictions["avg_feature_distance"]
             total_action_loss += ot_weight * self.temperature * predictions["ot_loss"]
 
-        loss_dict["action_loss"] = total_action_loss / len(self.domains)
+        if self.is_mix_schedule_enabled():
+            denom = total_mix_weight if normalize and total_mix_weight > 0 else 1.0
+        else:
+            denom = len(self.domains)
+
+        loss_dict["action_loss"] = total_action_loss / denom
         return loss_dict
 
     @override

@@ -16,10 +16,23 @@ TRAINER="${TRAINER:-debug}"
 RUN_NAME="${RUN_NAME:-viperx_aria_debug}"
 START_AT="${START_AT:-1}"
 DRY_RUN="${DRY_RUN:-0}"
+USE_MIX_SCHEDULE="${USE_MIX_SCHEDULE:-0}"
+MIX_SCHEDULE_PROFILE="${MIX_SCHEDULE_PROFILE:-default}"
 
 NORM_STAT_MAX_SAMPLES="${NORM_STAT_MAX_SAMPLES:-128}"
 SCALE_EPISODES_SMALL="${SCALE_EPISODES_SMALL:-500}"
 SCALE_EPISODES_LARGE="${SCALE_EPISODES_LARGE:-2000}"
+LOCAL_ARIA_MODEL="hpt_cotrain_viperx_aria"
+SCALE_MODEL="hpt_cotrain_viperx_aria_scale"
+ROBOT_SCALE_MODEL="hpt_cotrain_viperx_scale"
+RUN_SUFFIX=""
+
+if [[ "${USE_MIX_SCHEDULE}" == "1" ]]; then
+  LOCAL_ARIA_MODEL="hpt_cotrain_viperx_aria_sched"
+  SCALE_MODEL="hpt_cotrain_viperx_aria_scale_sched"
+  ROBOT_SCALE_MODEL="hpt_cotrain_viperx_scale_sched"
+  RUN_SUFFIX="_mix_sched"
+fi
 
 mkdir -p "${SCALE_CACHE_DIR}"
 
@@ -46,7 +59,8 @@ scale_resolver_overrides() {
 
 run_training() {
   local description="$1"
-  shift
+  local include_aria="$2"
+  shift 2
 
   echo
   echo "============================================================"
@@ -57,6 +71,8 @@ run_training() {
   echo "Scale cache: ${SCALE_CACHE_DIR}"
   echo "Trainer preset: ${TRAINER}"
   echo "Logger preset: ${LOGGER}"
+  echo "Use mix schedule: ${USE_MIX_SCHEDULE}"
+  echo "Mix schedule profile: ${MIX_SCHEDULE_PROFILE}"
   echo "Norm stats max samples: ${NORM_STAT_MAX_SAMPLES}"
   echo "Scale auto-exclude max abs: ${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}"
   echo "Dry run: ${DRY_RUN}"
@@ -74,10 +90,20 @@ run_training() {
     norm_stat_max_samples="${NORM_STAT_MAX_SAMPLES}" \
     data.train_datasets.viperx_right_arm.folder_path="${ROBOT_DATA_DIR}" \
     data.valid_datasets.viperx_right_arm.folder_path="${ROBOT_DATA_DIR}" \
-    data.train_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}" \
-    data.valid_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}" \
-    "$@"
   )
+
+  if [[ "${include_aria}" == "1" ]]; then
+    cmd+=(
+      data.train_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}"
+      data.valid_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}"
+    )
+  fi
+
+  cmd+=("$@")
+
+  if [[ "${USE_MIX_SCHEDULE}" == "1" ]]; then
+    cmd+=(model.robomimic_model.mix_schedule.profile="${MIX_SCHEDULE_PROFILE}")
+  fi
 
   printf 'Command:'
   printf ' %q' "${cmd[@]}"
@@ -94,18 +120,20 @@ run_training() {
 
 if [[ "${START_AT}" -le 1 ]]; then
   run_training \
-    robot_plus_local_aria_debug \
+    "robot_plus_local_aria_debug${RUN_SUFFIX}" \
+    1 \
     data=cotrain_viperx_aria_local \
-    model=hpt_cotrain_viperx_aria \
+    model="${LOCAL_ARIA_MODEL}" \
     trainer.strategy=ddp_find_unused_parameters_true
 fi
 
 if [[ "${START_AT}" -le 2 ]]; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
-    robot_plus_local_aria_plus_egoverse_cached_50_debug \
+    "robot_plus_local_aria_plus_egoverse_cached_50_debug${RUN_SUFFIX}" \
+    1 \
     data=cotrain_viperx_aria_scale \
-    model=hpt_cotrain_viperx_aria_scale \
+    model="${SCALE_MODEL}" \
     trainer.strategy=ddp_find_unused_parameters_true \
     data.train_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_SMALL}" \
     data.valid_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_SMALL}" \
@@ -115,9 +143,23 @@ fi
 if [[ "${START_AT}" -le 3 ]]; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
-    robot_plus_local_aria_plus_egoverse_cached_200_debug \
+    "robot_plus_local_aria_plus_egoverse_cached_200_debug${RUN_SUFFIX}" \
+    1 \
     data=cotrain_viperx_aria_scale \
-    model=hpt_cotrain_viperx_aria_scale \
+    model="${SCALE_MODEL}" \
+    trainer.strategy=ddp_find_unused_parameters_true \
+    data.train_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_LARGE}" \
+    data.valid_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_LARGE}" \
+    "${SCALE_OVERRIDES[@]}"
+fi
+
+if [[ "${START_AT}" -le 4 ]]; then
+  mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
+  run_training \
+    "robot_plus_egoverse_cached_200_debug${RUN_SUFFIX}" \
+    0 \
+    data=cotrain_viperx_scale \
+    model="${ROBOT_SCALE_MODEL}" \
     trainer.strategy=ddp_find_unused_parameters_true \
     data.train_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_LARGE}" \
     data.valid_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_LARGE}" \

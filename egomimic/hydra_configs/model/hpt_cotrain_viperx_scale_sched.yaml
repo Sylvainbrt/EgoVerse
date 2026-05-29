@@ -1,0 +1,49 @@
+defaults:
+  - hpt_cotrain_viperx_scale
+
+robomimic_model:
+  mix_schedule:
+    enabled: true
+    unit: progress
+    normalize: true
+    profile: default
+    profiles:
+      soft:
+        domains:
+          viperx_right_arm:
+            type: constant
+            value: 1.0
+          scale_bimanual:
+            type: piecewise_linear
+            points:
+              - [0.0, 2.0]
+              - [0.15, 2.0]
+              - [0.50, 1.0]
+              - [0.85, 0.50]
+              - [1.0, 0.50]
+      default:
+        domains:
+          viperx_right_arm:
+            type: constant
+            value: 1.0
+          scale_bimanual:
+            type: piecewise_linear
+            points:
+              - [0.0, 3.0]
+              - [0.10, 3.0]
+              - [0.45, 1.0]
+              - [0.80, 0.20]
+              - [1.0, 0.20]
+      aggressive:
+        domains:
+          viperx_right_arm:
+            type: constant
+            value: 1.0
+          scale_bimanual:
+            type: piecewise_linear
+            points:
+              - [0.0, 5.0]
+              - [0.10, 5.0]
+              - [0.40, 1.0]
+              - [0.75, 0.05]
+              - [1.0, 0.05]
