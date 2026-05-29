@@ -35,9 +35,6 @@ from aria_utils import (
 )
 from lerobot.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
 from projectaria_tools.core import data_provider, mps
-from projectaria_tools.core.mps.utils import (
-    get_nearest_hand_tracking_result,
-)
 from projectaria_tools.core.sensor_data import TimeDomain, TimeQueryOptions
 from projectaria_tools.core.stream_id import StreamId
 from tqdm import tqdm
@@ -448,6 +445,55 @@ EPISODE_LENGTH = 100
 CHUNK_LENGTH_ACT = 100
 
 ROTATION_MATRIX = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]])
+EGO_ROTATION_MATRIX = np.array(
+    [
+        [0, -1, 0],
+        [1, 0, 0],
+        [0, 0, 1],
+    ],
+    dtype=np.float32,
+)
+EGO_ROTATION_MATRIX_INV = EGO_ROTATION_MATRIX.T
+
+
+def _valid_hand(hand_obj):
+    return hand_obj is not None and getattr(hand_obj, "confidence", 0) > 0
+
+
+def _get_palm_position_device(hand_obj):
+    if hasattr(hand_obj, "get_palm_position_device"):
+        return hand_obj.get_palm_position_device()
+    return hand_obj.palm_position_device
+
+
+def _get_wrist_position_device(hand_obj):
+    if hasattr(hand_obj, "get_wrist_position_device"):
+        return hand_obj.get_wrist_position_device()
+    return hand_obj.wrist_position_device
+
+
+def _has_valid_hand_geometry(hand_obj):
+    if not _valid_hand(hand_obj):
+        return False
+    try:
+        palm = np.asarray(_get_palm_position_device(hand_obj), dtype=np.float32)
+        wrist = np.asarray(_get_wrist_position_device(hand_obj), dtype=np.float32)
+    except Exception:
+        return False
+    return np.isfinite(palm).all() and np.isfinite(wrist).all()
+
+
+def _apply_rotation_to_groups(arr, rotation_matrix):
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return arr
+    if arr.shape[-1] % 3 != 0:
+        raise ValueError(
+            f"Expected last dim to be a multiple of 3, got shape {arr.shape}"
+        )
+    reshaped = arr.reshape(*arr.shape[:-1], -1, 3)
+    rotated = np.einsum("ij,...gj->...gi", rotation_matrix, reshaped)
+    return rotated.reshape(arr.shape)
 
 
 # NOTE: Replaced by transform ee_pose
@@ -575,6 +621,8 @@ class AriaVRSExtractor:
         low_res=False,
         benchmark=False,
         hand_time_tolerance_ms=100.0,
+        crop_frames=50,
+        max_rgb_frames=None,
     ):
         """
         Extracts all feature keys from a given episode and returns as a dictionary
@@ -603,98 +651,31 @@ class AriaVRSExtractor:
         episode_feats = dict()
 
         # file setup and opening
-        root_dir = episode_path.parent
-
-        mps_sample_path = os.path.join(root_dir, ("mps_" + episode_path.stem + "_vrs"))
-
-        hand_tracking_results_path = os.path.join(
-            mps_sample_path, "hand_tracking", "hand_tracking_results.csv"
+        (
+            actions,
+            images,
+            pose,
+            stats,
+        ) = AriaVRSExtractor.extract_aligned_arrays(
+            episode_path=episode_path,
+            arm=arm,
+            low_res=low_res,
+            hand_time_tolerance_ms=hand_time_tolerance_ms,
+            crop_frames=crop_frames,
+            max_rgb_frames=max_rgb_frames,
+        )
+        kept_frames = int(stats.get("kept_frames", len(actions)))
+        candidate_frames = int(stats.get("candidate_frames", kept_frames))
+        print(
+            f"[DEBUG] SELECTED FRAMES: kept={kept_frames} candidate={candidate_frames} "
+            f"ratio={(kept_frames / candidate_frames):.3f}"
+            if candidate_frames > 0
+            else "[DEBUG] SELECTED FRAMES: kept=0 candidate=0 ratio=0.000"
         )
 
-        vrs_reader = data_provider.create_vrs_data_provider(str(episode_path))
-
-        hand_tracking_results = mps.hand_tracking.read_hand_tracking_results(
-            hand_tracking_results_path
-        )
-        valid_hand_timestamps_us = _load_valid_hand_timestamps_us(
-            hand_tracking_results_path
-        )
-
-        time_domain: TimeDomain = TimeDomain.DEVICE_TIME
-
-        stream_ids: Dict[str, StreamId] = {
-            "rgb": StreamId("214-1"),
-            "slam-left": StreamId("1201-1"),
-            "slam-right": StreamId("1201-2"),
-        }
-        stream_timestamps_ns: Dict[str, List[int]] = {
-            key: vrs_reader.get_timestamps_ns(stream_id, time_domain)
-            for key, stream_id in stream_ids.items()
-        }
-
-        mps_data_paths_provider = mps.MpsDataPathsProvider(mps_sample_path)
-        mps_data_paths = mps_data_paths_provider.get_data_paths()
-        mps_reader = mps.MpsDataProvider(mps_data_paths)
-
-        transform = slam_to_rgb(vrs_reader).to_matrix()
         episode_feats["observations"] = dict()
-
-        # ee_pose
-        # TODO: this will be useful for the future - when we add rotation and other state keys
         state_key = AriaVRSExtractor.get_state("ee_pose")[0]
-
-        pose = AriaVRSExtractor.get_ee_pose(
-            mps_reader=mps_reader,
-            transform=transform,
-            arm=arm,
-            stream_timestamps_ns=stream_timestamps_ns,
-            hand_tracking_results=hand_tracking_results,
-            valid_hand_timestamps_us=valid_hand_timestamps_us,
-            hand_time_tolerance_ms=hand_time_tolerance_ms,
-        )
-
-        # rgb_camera
-        # TODO: this will be useful for the future - when we add other camera modalities
         camera_key = AriaVRSExtractor.get_cameras("front_img_1")[0]
-
-        images = AriaVRSExtractor.get_images(
-            vrs_reader=vrs_reader,
-            stream_ids=stream_ids,
-            stream_timestamps_ns=stream_timestamps_ns,
-            benchmark=benchmark,
-        )
-
-        if low_res:
-            images = downsample_hwc_uint8_in_chunks(
-                images, out_hw=(240, 320), chunk=256
-            )
-
-        # with mem_section("process_episode.torch_from_numpy_permute", sample_interval_s=0.1, plot=False):
-        #     images = torch.from_numpy(images).permute(0, 3, 1, 2).float()
-
-        # if low_res:
-        #     with mem_section("process_episode.interpolate", sample_interval_s=0.1, plot=False):
-        #         images = F.interpolate(
-        #             images, size=(240, 320), mode="bilinear", align_corners=False
-        #         )
-
-        # with mem_section("process_episode.byte_numpy", sample_interval_s=0.1, plot=False):
-        #     images = images.byte().numpy()
-
-        # actions
-        actions = AriaVRSExtractor.get_action(
-            pose=pose,
-            mps_reader=mps_reader,
-            vrs_reader=vrs_reader,
-            stream_timestamps_ns=stream_timestamps_ns,
-            transform=transform,
-            arm=arm,
-            prestack=prestack,
-            hand_tracking_results=hand_tracking_results,
-            benchmark=benchmark,
-            valid_hand_timestamps_us=valid_hand_timestamps_us,
-            hand_time_tolerance_ms=hand_time_tolerance_ms,
-        )
 
         print(f"[DEBUG] LENGTH BEFORE CLEANING: {len(actions)}")
         actions, pose, images = AriaVRSExtractor.clean_data(
@@ -721,6 +702,268 @@ class AriaVRSExtractor:
         )
 
         return episode_feats
+
+    @staticmethod
+    def extract_aligned_arrays(
+        episode_path,
+        arm,
+        low_res=False,
+        hand_time_tolerance_ms=100.0,
+        crop_frames=50,
+        max_rgb_frames=None,
+    ):
+        root_dir = episode_path.parent
+        mps_sample_path = os.path.join(root_dir, ("mps_" + episode_path.stem + "_vrs"))
+        hand_tracking_results_path = os.path.join(
+            mps_sample_path, "hand_tracking", "hand_tracking_results.csv"
+        )
+
+        provider = data_provider.create_vrs_data_provider(str(episode_path))
+        _ = mps.hand_tracking.read_hand_tracking_results(hand_tracking_results_path)
+        valid_hand_timestamps_us = _load_valid_hand_timestamps_us(
+            hand_tracking_results_path
+        )
+
+        time_domain: TimeDomain = TimeDomain.DEVICE_TIME
+        time_query_closest: TimeQueryOptions = TimeQueryOptions.CLOSEST
+
+        stream_ids: Dict[str, StreamId] = {
+            "rgb": StreamId("214-1"),
+            "slam-left": StreamId("1201-1"),
+            "slam-right": StreamId("1201-2"),
+        }
+        stream_labels: Dict[str, str] = {
+            key: provider.get_label_from_stream_id(stream_id)
+            for key, stream_id in stream_ids.items()
+        }
+        stream_timestamps_ns: Dict[str, List[int]] = {
+            key: provider.get_timestamps_ns(stream_id, time_domain)
+            for key, stream_id in stream_ids.items()
+        }
+
+        if len(stream_timestamps_ns["rgb"]) == 0:
+            ac_dim = 3 if arm != "bimanual" else 6
+            return (
+                np.zeros((0, HORIZON_DEFAULT, ac_dim), dtype=np.float32),
+                np.zeros((0, 1, 1, 3), dtype=np.uint8),
+                np.zeros((0, ac_dim), dtype=np.float32),
+                {"kept_frames": 0},
+            )
+
+        vrs_data_provider = data_provider.create_vrs_data_provider(str(episode_path))
+        mps_data_paths_provider = mps.MpsDataPathsProvider(mps_sample_path)
+        mps_data_paths = mps_data_paths_provider.get_data_paths()
+        mps_data_provider = mps.MpsDataProvider(mps_data_paths)
+
+        transform = slam_to_rgb(vrs_data_provider)
+
+        device_calibration = vrs_data_provider.get_device_calibration()
+        rgb_calib = device_calibration.get_camera_calib(stream_labels["rgb"])
+        T_device_rgb_camera = rgb_calib.get_transform_device_camera()
+        T_rgb_camera_device = T_device_rgb_camera.inverse()
+
+        frame_length = len(stream_timestamps_ns["rgb"])
+        if max_rgb_frames is not None:
+            frame_length = min(frame_length, max_rgb_frames)
+
+        actions_list = []
+        imgs_list = []
+        ee_pose_list = []
+        ac_dim = 3 if arm != "bimanual" else 6
+        stats = {"candidate_frames": 0, "kept_frames": 0}
+
+        for t in range(crop_frames, max(crop_frames, frame_length - crop_frames)):
+            stats["candidate_frames"] += 1
+            sample_timestamp_ns_t = stream_timestamps_ns["rgb"][t]
+
+            ref_left_ns = _find_nearest_valid_timestamp_ns(
+                valid_hand_timestamps_us["left"],
+                sample_timestamp_ns_t,
+                hand_time_tolerance_ms,
+            )
+            ref_right_ns = _find_nearest_valid_timestamp_ns(
+                valid_hand_timestamps_us["right"],
+                sample_timestamp_ns_t,
+                hand_time_tolerance_ms,
+            )
+
+            if arm == "left":
+                if ref_left_ns is None:
+                    continue
+                wrist_t = mps_data_provider.get_hand_tracking_result(
+                    ref_left_ns, time_query_closest
+                )
+            elif arm == "right":
+                if ref_right_ns is None:
+                    continue
+                wrist_t = mps_data_provider.get_hand_tracking_result(
+                    ref_right_ns, time_query_closest
+                )
+            else:
+                if ref_left_ns is None and ref_right_ns is None:
+                    continue
+                ref_ns = ref_left_ns if ref_left_ns is not None else ref_right_ns
+                wrist_t = mps_data_provider.get_hand_tracking_result(
+                    ref_ns, time_query_closest
+                )
+
+            if wrist_t is None:
+                continue
+
+            try:
+                frame_rgb = provider.get_image_data_by_time_ns(
+                    stream_ids["rgb"],
+                    sample_timestamp_ns_t,
+                    time_domain,
+                    time_query_closest,
+                )[0]
+            except Exception:
+                continue
+
+            img_t = undistort_to_linear(
+                provider,
+                stream_ids,
+                raw_image=frame_rgb.to_numpy_array(),
+            )
+
+            pose_t = mps_data_provider.get_closed_loop_pose(
+                sample_timestamp_ns_t, time_query_closest
+            )
+            if pose_t is None:
+                continue
+
+            camera_matrix_t = build_camera_matrix(vrs_data_provider, pose_t)
+            camera_t_inv = np.linalg.inv(camera_matrix_t)
+
+            if arm == "right":
+                if not _has_valid_hand_geometry(wrist_t.right_hand):
+                    continue
+                palm_dev = _get_palm_position_device(wrist_t.right_hand)
+                palm_cam_t = np.array(T_rgb_camera_device @ palm_dev).flatten()
+                ee_pose_obs_t = EGO_ROTATION_MATRIX @ palm_cam_t
+            elif arm == "left":
+                if not _has_valid_hand_geometry(wrist_t.left_hand):
+                    continue
+                palm_dev = _get_palm_position_device(wrist_t.left_hand)
+                palm_cam_t = np.array(T_rgb_camera_device @ palm_dev).flatten()
+                ee_pose_obs_t = EGO_ROTATION_MATRIX @ palm_cam_t
+            else:
+                ee_pose_obs_t = np.zeros(6, dtype=np.float32)
+                if _has_valid_hand_geometry(wrist_t.left_hand):
+                    palm_l_dev = _get_palm_position_device(wrist_t.left_hand)
+                    palm_l_cam_t = np.array(T_rgb_camera_device @ palm_l_dev).flatten()
+                    ee_pose_obs_t[:3] = EGO_ROTATION_MATRIX @ palm_l_cam_t
+                if _has_valid_hand_geometry(wrist_t.right_hand):
+                    palm_r_dev = _get_palm_position_device(wrist_t.right_hand)
+                    palm_r_cam_t = np.array(T_rgb_camera_device @ palm_r_dev).flatten()
+                    ee_pose_obs_t[3:] = EGO_ROTATION_MATRIX @ palm_r_cam_t
+
+            actions_t = np.zeros((HORIZON_DEFAULT, ac_dim), dtype=np.float32)
+            for offset in range(HORIZON_DEFAULT):
+                idx = int(t + offset * STEP_DEFAULT)
+                if idx >= frame_length:
+                    break
+                ts_ns = stream_timestamps_ns["rgb"][idx]
+                off_left_ns = _find_nearest_valid_timestamp_ns(
+                    valid_hand_timestamps_us["left"], ts_ns, hand_time_tolerance_ms
+                )
+                off_right_ns = _find_nearest_valid_timestamp_ns(
+                    valid_hand_timestamps_us["right"], ts_ns, hand_time_tolerance_ms
+                )
+                if arm == "left":
+                    query_ns = off_left_ns
+                elif arm == "right":
+                    query_ns = off_right_ns
+                else:
+                    query_ns = off_left_ns if off_left_ns is not None else off_right_ns
+
+                wrist_off = (
+                    mps_data_provider.get_hand_tracking_result(
+                        query_ns, time_query_closest
+                    )
+                    if query_ns is not None
+                    else None
+                )
+                pose_off = mps_data_provider.get_closed_loop_pose(
+                    ts_ns, time_query_closest
+                )
+                if wrist_off is None or pose_off is None:
+                    continue
+
+                cam_mat_off = build_camera_matrix(vrs_data_provider, pose_off)
+
+                if arm == "right":
+                    if not _has_valid_hand_geometry(wrist_off.right_hand):
+                        continue
+                    palm_dev = _get_palm_position_device(wrist_off.right_hand)
+                    palm_cam = (transform @ palm_dev).T
+                    palm_cam_h = np.concatenate([palm_cam, np.ones((1, 1))], axis=1)
+                    world = (cam_mat_off @ palm_cam_h.T).T
+                    palm_in_cam_t = (camera_t_inv @ world.T).T[0, :3]
+                    actions_t[offset, :] = palm_in_cam_t
+                elif arm == "left":
+                    if not _has_valid_hand_geometry(wrist_off.left_hand):
+                        continue
+                    palm_dev = _get_palm_position_device(wrist_off.left_hand)
+                    palm_cam = (transform @ palm_dev).T
+                    palm_cam_h = np.concatenate([palm_cam, np.ones((1, 1))], axis=1)
+                    world = (cam_mat_off @ palm_cam_h.T).T
+                    palm_in_cam_t = (camera_t_inv @ world.T).T[0, :3]
+                    actions_t[offset, :] = palm_in_cam_t
+                else:
+                    have_l = _has_valid_hand_geometry(wrist_off.left_hand)
+                    have_r = _has_valid_hand_geometry(wrist_off.right_hand)
+                    if not (have_l or have_r):
+                        continue
+                    cam_l_t = np.zeros(3, dtype=np.float32)
+                    cam_r_t = np.zeros(3, dtype=np.float32)
+                    if have_l:
+                        palm_l_dev = _get_palm_position_device(wrist_off.left_hand)
+                        palm_l_cam = (transform @ palm_l_dev).T
+                        palm_l_cam_h = np.concatenate(
+                            [palm_l_cam, np.ones((1, 1))], axis=1
+                        )
+                        world_l = (cam_mat_off @ palm_l_cam_h.T).T
+                        cam_l_t = (camera_t_inv @ world_l.T).T[0, :3]
+                    if have_r:
+                        palm_r_dev = _get_palm_position_device(wrist_off.right_hand)
+                        palm_r_cam = (transform @ palm_r_dev).T
+                        palm_r_cam_h = np.concatenate(
+                            [palm_r_cam, np.ones((1, 1))], axis=1
+                        )
+                        world_r = (cam_mat_off @ palm_r_cam_h.T).T
+                        cam_r_t = (camera_t_inv @ world_r.T).T[0, :3]
+                    actions_t[offset, :] = np.concatenate([cam_l_t, cam_r_t], axis=0)
+
+            rotated_actions_t = _apply_rotation_to_groups(
+                actions_t, EGO_ROTATION_MATRIX
+            )
+
+            actions_list.append(rotated_actions_t)
+            imgs_list.append(img_t)
+            ee_pose_list.append(ee_pose_obs_t)
+            stats["kept_frames"] += 1
+
+        if len(actions_list) == 0:
+            return (
+                np.zeros((0, HORIZON_DEFAULT, ac_dim), dtype=np.float32),
+                np.zeros((0, 1, 1, 3), dtype=np.uint8),
+                np.zeros((0, ac_dim), dtype=np.float32),
+                stats,
+            )
+
+        actions = np.stack(actions_list, axis=0)
+        images = np.stack(imgs_list, axis=0)
+        pose = np.stack(ee_pose_list, axis=0)
+
+        if not low_res:
+            pass
+        else:
+            images = downsample_hwc_uint8_in_chunks(
+                images, out_hw=(240, 320), chunk=256
+            )
+
+        return actions, images, pose, stats
 
     @staticmethod
     def get_action(
@@ -808,7 +1051,7 @@ class AriaVRSExtractor:
                     valid_ts_ns = left_ts_ns if left_ts_ns is not None else right_ts_ns
 
                 hand_tracking_result_offset = (
-                    get_nearest_hand_tracking_result(hand_tracking_results, valid_ts_ns)
+                    mps_reader.get_hand_tracking_result(valid_ts_ns, time_query_closest)
                     if valid_ts_ns is not None
                     else None
                 )
@@ -1137,7 +1380,9 @@ class AriaVRSExtractor:
                 valid_ts_ns = left_ts_ns if left_ts_ns is not None else right_ts_ns
 
             hand_tracking_result_t = (
-                get_nearest_hand_tracking_result(hand_tracking_results, valid_ts_ns)
+                mps_reader.get_hand_tracking_result(
+                    valid_ts_ns, TimeQueryOptions.CLOSEST
+                )
                 if valid_ts_ns is not None
                 else None
             )
@@ -1330,6 +1575,8 @@ class AriaVRSExtractor:
         prestack: bool = False,
         benchmark: bool = False,
         hand_time_tolerance_ms: float = 100.0,
+        crop_frames: int = 50,
+        max_rgb_frames: int | None = None,
     ):
         episode_feats = AriaVRSExtractor.process_episode(
             episode_path,
@@ -1337,6 +1584,8 @@ class AriaVRSExtractor:
             prestack=prestack,
             benchmark=benchmark,
             hand_time_tolerance_ms=hand_time_tolerance_ms,
+            crop_frames=crop_frames,
+            max_rgb_frames=max_rgb_frames,
         )
         try:
             num_frames = next(iter(episode_feats["observations"].values())).shape[0]
@@ -1402,17 +1651,26 @@ class AriaVRSExtractor:
         for key, value in episode_feats.items():
             if isinstance(value, dict):
                 for k, v in value.items():
-                    features[f"observations.{k}"] = {
-                        "dtype": "float32"
+                    dtype = (
+                        "float32"
                         if hasattr(v, "dtype") and "float" in str(v.dtype)
-                        else "int32",
+                        else "int32"
+                    )
+                    if (
+                        "images" in k
+                        and hasattr(v, "dtype")
+                        and str(v.dtype) == "uint8"
+                    ):
+                        dtype = "uint8"
+                    features[f"observations.{k}"] = {
+                        "dtype": dtype,
                         "shape": v.shape[1:],
                         "names": [f"dim_{i}" for i in range(len(v.shape) - 1)],
                     }
                     if "images" in k:
                         if encode_as_video:
                             features[f"observations.{k}"]["dtype"] = "video"
-                        elif image_compressed:
+                        else:
                             features[f"observations.{k}"]["dtype"] = "image"
                         features[f"observations.{k}"]["names"] = [
                             "height",
@@ -1484,6 +1742,8 @@ class DatasetConverter:
         debug: bool = False,
         benchmark: bool = False,
         hand_time_tolerance_ms: float = 100.0,
+        crop_frames: int = 50,
+        max_rgb_frames: int | None = None,
     ):
         self.raw_path = raw_path if isinstance(raw_path, Path) else Path(raw_path)
         self.dataset_repo_id = dataset_repo_id
@@ -1496,6 +1756,8 @@ class DatasetConverter:
         self.prestack = prestack
         self.benchmark = benchmark
         self.hand_time_tolerance_ms = hand_time_tolerance_ms
+        self.crop_frames = crop_frames
+        self.max_rgb_frames = max_rgb_frames
         if self.benchmark:
             print(
                 "Benchmark mode enabled. This will plot the RAM usage of each section."
@@ -1520,6 +1782,8 @@ class DatasetConverter:
         self.logger.info(f"Encoding images as videos: {self.encode_as_videos}")
         self.logger.info(f"Prestack: {self.prestack}")
         self.logger.info(f"Hand time tolerance (ms): {self.hand_time_tolerance_ms}")
+        self.logger.info(f"Crop frames each side: {self.crop_frames}")
+        self.logger.info(f"Max RGB frames: {self.max_rgb_frames}")
         self.logger.info(f"#writer processes: {self.image_writer_processes}")
         self.logger.info(f"#writer threads: {self.image_writer_threads}")
 
@@ -1543,6 +1807,8 @@ class DatasetConverter:
                 prestack=self.prestack,
                 benchmark=self.benchmark,
                 hand_time_tolerance_ms=self.hand_time_tolerance_ms,
+                crop_frames=self.crop_frames,
+                max_rgb_frames=self.max_rgb_frames,
             )
 
         if self.arm == "bimanual":
@@ -1772,6 +2038,8 @@ class DatasetConverter:
             self.prestack,
             self.benchmark,
             self.hand_time_tolerance_ms,
+            self.crop_frames,
+            self.max_rgb_frames,
         ):
             # 1. Ensure Task exists
             frame["task"] = task_description
@@ -2031,6 +2299,18 @@ def argument_parse():
         default=100.0,
         help="Maximum timestamp gap in milliseconds when matching RGB frames to valid Aria hand tracking.",
     )
+    parser.add_argument(
+        "--crop-frames",
+        type=int,
+        default=50,
+        help="Number of RGB frames to ignore at the start and end of each recording, matching EgoMimic preprocessing.",
+    )
+    parser.add_argument(
+        "--max-rgb-frames",
+        type=int,
+        default=None,
+        help="Optional cap on the number of RGB frames considered per recording.",
+    )
 
     args = parser.parse_args()
 
@@ -2065,6 +2345,8 @@ def main(args):
         debug=args.debug,
         benchmark=args.benchmark,
         hand_time_tolerance_ms=args.hand_time_tolerance_ms,
+        crop_frames=args.crop_frames,
+        max_rgb_frames=args.max_rgb_frames,
     )
 
     # Initialize the dataset

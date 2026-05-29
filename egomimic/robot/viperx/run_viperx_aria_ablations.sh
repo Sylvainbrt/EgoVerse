@@ -11,19 +11,29 @@ SCALE_MANIFEST_PATH="${SCALE_MANIFEST_PATH:-/data/sybeuret/scale_2000_manifest.j
 SCALE_MANIFEST_LOCAL_ONLY="${SCALE_MANIFEST_LOCAL_ONLY:-0}"
 SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS="${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS:-100.0}"
 
-LOGGER="${LOGGER:-debug}"
-TRAINER="${TRAINER:-debug}"
-RUN_NAME="${RUN_NAME:-viperx_aria_debug}"
+LOGGER="${LOGGER:-wandb}"
+TRAINER="${TRAINER:-ddp}"
+RUN_NAME="${RUN_NAME:-viperx_aria_ablation}"
 START_AT="${START_AT:-1}"
+END_AT="${END_AT:-3}"
 DRY_RUN="${DRY_RUN:-0}"
 
-NORM_STAT_MAX_SAMPLES="${NORM_STAT_MAX_SAMPLES:-128}"
 SCALE_EPISODES_SMALL="${SCALE_EPISODES_SMALL:-500}"
 SCALE_EPISODES_LARGE="${SCALE_EPISODES_LARGE:-2000}"
 
 mkdir -p "${SCALE_CACHE_DIR}"
 
 cd "${EGOVERSE_ROOT}"
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+in_range() {
+  local step="$1"
+  [[ "$step" -ge "$START_AT" && "$step" -le "$END_AT" ]]
+}
 
 scale_resolver_overrides() {
   if [[ -z "${SCALE_MANIFEST_PATH}" ]]; then
@@ -57,25 +67,27 @@ run_training() {
   echo "Scale cache: ${SCALE_CACHE_DIR}"
   echo "Trainer preset: ${TRAINER}"
   echo "Logger preset: ${LOGGER}"
-  echo "Norm stats max samples: ${NORM_STAT_MAX_SAMPLES}"
   echo "Scale auto-exclude max abs: ${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}"
   echo "Dry run: ${DRY_RUN}"
-  echo "============================================================"
+echo "============================================================"
   echo
+
+  [[ "${START_AT}" =~ ^[0-9]+$ ]] || die "START_AT must be an integer"
+  [[ "${END_AT}" =~ ^[0-9]+$ ]] || die "END_AT must be an integer"
+  [[ "${START_AT}" -le "${END_AT}" ]] || die "START_AT must be <= END_AT"
 
   local -a cmd=(
     python3
     egomimic/trainHydra.py
-    --config-name=train \
-    logger="${LOGGER}" \
-    trainer="${TRAINER}" \
-    name="${RUN_NAME}" \
-    description="${description}" \
-    norm_stat_max_samples="${NORM_STAT_MAX_SAMPLES}" \
-    data.train_datasets.viperx_right_arm.folder_path="${ROBOT_DATA_DIR}" \
-    data.valid_datasets.viperx_right_arm.folder_path="${ROBOT_DATA_DIR}" \
-    data.train_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}" \
-    data.valid_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}" \
+    --config-name=train
+    logger="${LOGGER}"
+    trainer="${TRAINER}"
+    name="${RUN_NAME}"
+    description="${description}"
+    data.train_datasets.viperx_right_arm.folder_path="${ROBOT_DATA_DIR}"
+    data.valid_datasets.viperx_right_arm.folder_path="${ROBOT_DATA_DIR}"
+    data.train_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}"
+    data.valid_datasets.aria_left_arm.folder_path="${ARIA_DATA_DIR}"
     "$@"
   )
 
@@ -92,18 +104,18 @@ run_training() {
     "${cmd[@]}"
 }
 
-if [[ "${START_AT}" -le 1 ]]; then
+if in_range 1; then
   run_training \
-    robot_plus_local_aria_debug \
+    robot_plus_local_aria \
     data=cotrain_viperx_aria_local \
     model=hpt_cotrain_viperx_aria \
     trainer.strategy=ddp_find_unused_parameters_true
 fi
 
-if [[ "${START_AT}" -le 2 ]]; then
+if in_range 2; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
-    robot_plus_local_aria_plus_egoverse_cached_50_debug \
+    robot_plus_local_aria_plus_egoverse_cached_500 \
     data=cotrain_viperx_aria_scale \
     model=hpt_cotrain_viperx_aria_scale \
     trainer.strategy=ddp_find_unused_parameters_true \
@@ -112,10 +124,10 @@ if [[ "${START_AT}" -le 2 ]]; then
     "${SCALE_OVERRIDES[@]}"
 fi
 
-if [[ "${START_AT}" -le 3 ]]; then
+if in_range 3; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
-    robot_plus_local_aria_plus_egoverse_cached_200_debug \
+    robot_plus_local_aria_plus_egoverse_cached_2000 \
     data=cotrain_viperx_aria_scale \
     model=hpt_cotrain_viperx_aria_scale \
     trainer.strategy=ddp_find_unused_parameters_true \
