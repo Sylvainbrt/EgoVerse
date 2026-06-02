@@ -103,7 +103,7 @@ robomimic_model:
         mlp_ratio: 4
     viperx_left_arm:
       _target_: egomimic.models.fm_policy.FMPolicy
-      action_horizon: 64
+      action_horizon: 45
       num_inference_steps: 50
       pooling: null
       time_dist: "beta"
@@ -115,7 +115,7 @@ robomimic_model:
         cond_dim: 256
         hidden_dim: 128
         act_dim: 7
-        act_seq: 64
+        act_seq: 45
         n_heads: 4
         dropout: 0.1
         mlp_layers: 4

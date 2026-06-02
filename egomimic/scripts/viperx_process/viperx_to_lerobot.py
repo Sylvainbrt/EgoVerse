@@ -2,10 +2,10 @@
 Convert a ViperX LeRobot dataset to EgoVerse-compatible LeRobot format.
 
 Adds:
-  - actions.joints_act  : (T, 100, 7) pre-chunked joint actions (9→7 DoF)
+  - actions.joints_act  : (T, 45, 7) pre-chunked joint actions (9->7 DoF)
   - metadata.embodiment : scalar int32 embodiment id per frame
 
-Strips shadow joints at indices 2 and 4 from 9-DoF → 7-DoF.
+Strips shadow joints at indices 2 and 4 from 9-DoF -> 7-DoF.
 Updates info.json robot_type to "viperx_right_arm" or "viperx_left_arm".
 
 Usage:
@@ -32,18 +32,23 @@ from egomimic.scripts.viperx_process.fix_episodes_metadata import fix_episodes_m
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ViperX 9-DoF → 7-DoF: drop shadow joints at indices 2 and 4
+# ViperX 9-DoF -> 7-DoF: drop shadow joints at indices 2 and 4
 VIPERX_KEEP_INDICES = [0, 1, 3, 5, 6, 7, 8]
 
-POINT_GAP = 2
-CHUNK_LENGTH = 100
+POINT_GAP = 1
+CHUNK_LENGTH = 45
+RESET_SHOULDER_MAX = -70.0
+RESET_ELBOW_MIN = 75.0
+RESET_MIN_RUN = 12
+RESET_TRIM_EXTRA_FRAMES = 30
+RESET_MIN_KEEP_FRAMES = 30
 
 
 def get_future_points(
     arr: np.ndarray, point_gap=POINT_GAP, chunk_length=CHUNK_LENGTH
 ) -> np.ndarray:
     """
-    arr: (T, D) → (T, chunk_length, D)
+    arr: (T, D) -> (T, chunk_length, D)
     For each timestep t, collect chunk_length future points spaced point_gap apart.
     Pads with last point if out of bounds.
     """
@@ -54,16 +59,54 @@ def get_future_points(
     return arr[all_idx]  # (T, chunk_length, D)
 
 
-def process_episode(actions_9dof: np.ndarray):
+def find_terminal_reset_trim_end(
+    joints_7dof: np.ndarray,
+    shoulder_max: float = RESET_SHOULDER_MAX,
+    elbow_min: float = RESET_ELBOW_MIN,
+    min_run: int = RESET_MIN_RUN,
+    extra_frames: int = RESET_TRIM_EXTRA_FRAMES,
+    min_keep_frames: int = RESET_MIN_KEEP_FRAMES,
+) -> int:
+    """Return the frame count to keep after removing a terminal reset segment."""
+    if len(joints_7dof) == 0:
+        return 0
+
+    reset_like = (joints_7dof[:, 1] <= shoulder_max) & (joints_7dof[:, 2] >= elbow_min)
+    reset_indices = np.flatnonzero(reset_like)
+    if len(reset_indices) == 0:
+        return len(joints_7dof)
+
+    end = int(reset_indices[-1]) + 1
+    start = end - 1
+    while start > 0 and reset_like[start - 1]:
+        start -= 1
+
+    run_len = end - start
+    trailing_non_reset = len(joints_7dof) - end
+    if run_len < min_run or trailing_non_reset > min_run:
+        return len(joints_7dof)
+
+    trim_end = max(0, start - extra_frames)
+    if trim_end < min_keep_frames:
+        return len(joints_7dof)
+    return trim_end
+
+
+def process_episode(
+    actions_7dof: np.ndarray,
+    point_gap: int = POINT_GAP,
+    chunk_length: int = CHUNK_LENGTH,
+):
     """
-    actions_9dof: (T, 9)
+    actions_7dof: (T, 7)
     Returns:
         joints_7dof      : (T, 7)
-        joints_act_chunk : (T, 100, 7)
+        joints_act_chunk : (T, chunk_length, 7)
     """
-    joints_7dof = actions_9dof[:, VIPERX_KEEP_INDICES]  # (T, 7)
-    joints_act_chunk = get_future_points(joints_7dof)  # (T, 100, 7)
-    return joints_7dof, joints_act_chunk
+    joints_act_chunk = get_future_points(
+        actions_7dof, point_gap=point_gap, chunk_length=chunk_length
+    )
+    return actions_7dof, joints_act_chunk
 
 
 ARM_TO_ROBOT_TYPE = {
@@ -77,7 +120,25 @@ ARM_TO_EMBODIMENT = {
 }
 
 
-def convert(input_path: Path, output_path: Path, repo_id: str, arm: str):
+def convert(
+    input_path: Path,
+    output_path: Path,
+    repo_id: str,
+    arm: str,
+    point_gap: int = POINT_GAP,
+    chunk_length: int = CHUNK_LENGTH,
+    trim_terminal_reset: bool = True,
+    reset_shoulder_max: float = RESET_SHOULDER_MAX,
+    reset_elbow_min: float = RESET_ELBOW_MIN,
+    reset_min_run: int = RESET_MIN_RUN,
+    reset_trim_extra_frames: int = RESET_TRIM_EXTRA_FRAMES,
+    reset_min_keep_frames: int = RESET_MIN_KEEP_FRAMES,
+):
+    if point_gap < 1:
+        raise ValueError(f"point_gap must be >= 1, got {point_gap}")
+    if chunk_length < 1:
+        raise ValueError(f"chunk_length must be >= 1, got {chunk_length}")
+
     robot_type = ARM_TO_ROBOT_TYPE[arm]
     embodiment_id = ARM_TO_EMBODIMENT[arm]
 
@@ -115,10 +176,10 @@ def convert(input_path: Path, output_path: Path, repo_id: str, arm: str):
         ],
     }
 
-    # actions.joints_act: pre-chunked (100, 7)
+    # actions.joints_act: pre-chunked (chunk_length, 7)
     new_features["actions.joints_act"] = {
         "dtype": "float32",
-        "shape": (CHUNK_LENGTH, 7),
+        "shape": (chunk_length, 7),
         "names": ["chunk_length", "action_dim"],
     }
 
@@ -185,8 +246,36 @@ def convert(input_path: Path, output_path: Path, repo_id: str, arm: str):
         state_9dof = np.array(ep_data["observation.state"])  # (T, 9)
 
         # Process
-        state_7dof, joints_act_chunk = process_episode(actions_9dof)
+        action_7dof = actions_9dof[:, VIPERX_KEEP_INDICES]
         state_7dof_obs = state_9dof[:, VIPERX_KEEP_INDICES]  # (T, 7)
+        if trim_terminal_reset:
+            trim_end = find_terminal_reset_trim_end(
+                action_7dof,
+                shoulder_max=reset_shoulder_max,
+                elbow_min=reset_elbow_min,
+                min_run=reset_min_run,
+                extra_frames=reset_trim_extra_frames,
+                min_keep_frames=reset_min_keep_frames,
+            )
+            if trim_end < len(action_7dof):
+                logger.info(
+                    "    Trimming terminal reset: keep %d/%d frames "
+                    "(shoulder<=%.1f, elbow>=%.1f, extra=%d)",
+                    trim_end,
+                    len(action_7dof),
+                    reset_shoulder_max,
+                    reset_elbow_min,
+                    reset_trim_extra_frames,
+                )
+                action_7dof = action_7dof[:trim_end]
+                state_7dof_obs = state_7dof_obs[:trim_end]
+                frame_indices = frame_indices[:trim_end]
+
+        action_7dof, joints_act_chunk = process_episode(
+            action_7dof,
+            point_gap=point_gap,
+            chunk_length=chunk_length,
+        )
 
         # T = len(frame_indices)
         task_idx = int(ep_data["task_index"][0])
@@ -248,8 +337,69 @@ def main():
         default="right",
         help="Which ViperX arm embodiment this dataset should target.",
     )
+    parser.add_argument(
+        "--point-gap",
+        type=int,
+        default=POINT_GAP,
+        help="Frame spacing between action chunk points.",
+    )
+    parser.add_argument(
+        "--chunk-length",
+        type=int,
+        default=CHUNK_LENGTH,
+        help="Number of points in each pre-chunked joint action.",
+    )
+    parser.add_argument(
+        "--no-trim-terminal-reset",
+        dest="trim_terminal_reset",
+        action="store_false",
+        help="Keep terminal reset/foldback frames instead of trimming them.",
+    )
+    parser.add_argument(
+        "--reset-shoulder-max",
+        type=float,
+        default=RESET_SHOULDER_MAX,
+        help="Shoulder threshold for terminal reset detection.",
+    )
+    parser.add_argument(
+        "--reset-elbow-min",
+        type=float,
+        default=RESET_ELBOW_MIN,
+        help="Elbow threshold for terminal reset detection.",
+    )
+    parser.add_argument(
+        "--reset-min-run",
+        type=int,
+        default=RESET_MIN_RUN,
+        help="Minimum contiguous reset-like frames required at the episode end.",
+    )
+    parser.add_argument(
+        "--reset-trim-extra-frames",
+        type=int,
+        default=RESET_TRIM_EXTRA_FRAMES,
+        help="Extra frames to trim before the detected terminal reset segment.",
+    )
+    parser.add_argument(
+        "--reset-min-keep-frames",
+        type=int,
+        default=RESET_MIN_KEEP_FRAMES,
+        help="Do not trim an episode below this many frames.",
+    )
     args = parser.parse_args()
-    convert(args.input_path, args.output_path, args.repo_id, args.arm)
+    convert(
+        args.input_path,
+        args.output_path,
+        args.repo_id,
+        args.arm,
+        point_gap=args.point_gap,
+        chunk_length=args.chunk_length,
+        trim_terminal_reset=args.trim_terminal_reset,
+        reset_shoulder_max=args.reset_shoulder_max,
+        reset_elbow_min=args.reset_elbow_min,
+        reset_min_run=args.reset_min_run,
+        reset_trim_extra_frames=args.reset_trim_extra_frames,
+        reset_min_keep_frames=args.reset_min_keep_frames,
+    )
 
 
 if __name__ == "__main__":

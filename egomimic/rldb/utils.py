@@ -1134,6 +1134,15 @@ class DataSchematic(object):
             return None
         return df_filtered["lerobot_key"].item()
 
+    def _norm_stats_key(self, key, embodiment):
+        """Resolve either a schematic key name or a LeRobot column name to norm stats."""
+        if isinstance(embodiment, str):
+            embodiment = get_embodiment_id(embodiment)
+        if self.is_key_with_embodiment(key, embodiment):
+            return key
+        key_name = self.lerobot_key_to_keyname(key, embodiment)
+        return key_name if key_name is not None else key
+
     def infer_shapes_from_batch(self, batch):
         """
         Update shapes in the DataFrame based on a batch.
@@ -1437,21 +1446,25 @@ class DataSchematic(object):
             raise ValueError(
                 "Normalization statistics not set. Call infer_norm_from_dataset() first."
             )
+        if isinstance(embodiment, str):
+            embodiment = get_embodiment_id(embodiment)
 
         norm_data = {}
         for key, tensor in data.items():
-            if key in self.keys_of_type("proprio_keys") or key in self.keys_of_type(
-                "action_keys"
-            ):
+            stats_key = self._norm_stats_key(key, embodiment)
+            if stats_key in self.keys_of_type(
+                "proprio_keys"
+            ) or stats_key in self.keys_of_type("action_keys"):
                 if (
                     embodiment not in self.norm_stats
-                    or key not in self.norm_stats[embodiment]
+                    or stats_key not in self.norm_stats[embodiment]
                 ):
                     raise ValueError(
-                        f"Missing normalization stats for key {key} and embodiment {embodiment}."
+                        f"Missing normalization stats for key {key} "
+                        f"(resolved to {stats_key}) and embodiment {embodiment}."
                     )
 
-                stats = self.norm_stats[embodiment][key]
+                stats = self.norm_stats[embodiment][stats_key]
                 if self.norm_mode == "zscore":
                     mean = self._align_stats_to_tensor(
                         stats["mean"].to(tensor.device), tensor
@@ -1517,21 +1530,25 @@ class DataSchematic(object):
             raise ValueError(
                 "Normalization statistics not set. Call infer_norm_from_dataset() first."
             )
+        if isinstance(embodiment, str):
+            embodiment = get_embodiment_id(embodiment)
 
         denorm_data = {}
         for key, tensor in data.items():
-            if key in self.keys_of_type("proprio_keys") or key in self.keys_of_type(
-                "action_keys"
-            ):
+            stats_key = self._norm_stats_key(key, embodiment)
+            if stats_key in self.keys_of_type(
+                "proprio_keys"
+            ) or stats_key in self.keys_of_type("action_keys"):
                 if (
                     embodiment not in self.norm_stats
-                    or key not in self.norm_stats[embodiment]
+                    or stats_key not in self.norm_stats[embodiment]
                 ):
                     raise ValueError(
-                        f"Missing normalization stats for key {key} and embodiment {embodiment}."
+                        f"Missing normalization stats for key {key} "
+                        f"(resolved to {stats_key}) and embodiment {embodiment}."
                     )
 
-                stats = self.norm_stats[embodiment][key]
+                stats = self.norm_stats[embodiment][stats_key]
                 if self.norm_mode == "zscore":
                     mean = self._align_stats_to_tensor(
                         stats["mean"].to(tensor.device), tensor

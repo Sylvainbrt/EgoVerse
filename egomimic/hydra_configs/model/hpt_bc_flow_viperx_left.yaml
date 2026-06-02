@@ -15,7 +15,7 @@ robomimic_model:
     num_heads: 8
     token_postprocessing: action_token
     observation_horizon: 1
-    action_horizon: 100
+    action_horizon: 45
     no_trunk: false
     use_domain_embedding: true
     drop_path: 0.1
@@ -81,7 +81,7 @@ robomimic_model:
   head_specs:
     viperx_left_arm:
       _target_: egomimic.models.fm_policy.FMPolicy
-      action_horizon: 100
+      action_horizon: 45
       num_inference_steps: 50
       pooling: null
       time_dist: beta
@@ -93,7 +93,7 @@ robomimic_model:
         cond_dim: 256
         hidden_dim: 128
         act_dim: 7
-        act_seq: 100
+        act_seq: 45
         n_heads: 4
         dropout: 0.1
         mlp_layers: 4

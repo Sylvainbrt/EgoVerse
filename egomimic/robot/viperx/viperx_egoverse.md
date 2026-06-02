@@ -37,12 +37,12 @@ For Scale co-training:
 
 Original recorded dataset at:
 
-    /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_sponge
+    /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place
 
 | Property            | Original Value                     | Converted Value (EgoVerse)       |
 | ------------------- | ---------------------------------- | -------------------------------- |
 | `robot_type`        | "viperx"                           | "viperx_right_arm" or "viperx_left_arm" |
-| Action shape        | (T, 9) - 2 shadow joints           | (T, 100, 7) chunked 7-DoF        |
+| Action shape        | (T, 9) - 2 shadow joints           | (T, 45, 7) chunked 7-DoF         |
 | `observation.state` | (T, 9)                             | (T, 7)                           |
 | Images              | observation.images...              | observation.images...            |
 | Keys added          | -                                  | actions.joints_act, metadata...  |
@@ -56,7 +56,7 @@ Original recorded dataset at:
 - **`egomimic/rldb/embodiment/viperx.py`**: Created `ViperX` mapping class defining `get_keymap()` and image formats (`[B, C, H, W]`).
 
 ### 2. Dataset Processing
-- **`egomimic/scripts/viperx_process/viperx_to_lerobot.py`**: Handles filtering out shadow joints (indices 2 and 4), converting from 9-DoF to 7-DoF, adding the embodiment enum to parquet, chunking actions (T=100), and rewriting metadata.
+- **`egomimic/scripts/viperx_process/viperx_to_lerobot.py`**: Handles filtering out shadow joints (indices 2 and 4), converting from 9-DoF to 7-DoF, adding the embodiment enum to parquet, chunking actions (`45` points, `point_gap=1`), trimming terminal reset/foldback frames, and rewriting metadata.
 - **`egomimic/scripts/viperx_process/fix_episodes_metadata.py`**: Repairs video metadata lost or mangled during Pandas/Parquet conversions.
 
 ### 3. HPT Hydra Configs
@@ -64,7 +64,7 @@ Original recorded dataset at:
 - **`hydra_configs/train.yaml`**: Updated `DataSchematic` and dataset paths to map LeRobot raw names to EgoVerse model names dynamically.
 - **`hydra_configs/data/cotrain_viperx_scale.yaml`**: Adds ViperX + Scale co-training. ViperX is read from local LeRobot data and Scale is read from Zarr episodes.
 - **`hydra_configs/model/hpt_cotrain_viperx_scale.yaml`**: Adds separate action heads for ViperX joint actions and Scale Cartesian actions while sharing the front camera representation.
-- **`egomimic/algo/hpt.py`**: Supports per-domain action horizons so ViperX can use 64-step joint chunks and Scale can use 100-step Cartesian chunks in the same run.
+- **`egomimic/algo/hpt.py`**: Supports per-domain action horizons so ViperX can use 45-step joint chunks and Scale can use 100-step Cartesian chunks in the same run.
 - **`egomimic/rldb/utils.py`**: Supports normalization statistics for transformed Zarr outputs such as Scale `state_ee_pose` and `actions_cartesian`.
 
 ---
@@ -129,18 +129,41 @@ python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
   --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
   --repo-id     lerobot/pick_and_place_egoverse \
-  --arm         right
+  --arm         right \
+  --chunk-length 45 \
+  --point-gap 1
 
 # For a left-arm dataset, switch the embodiment and keep the same source path shape.
 python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_left \
   --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_left_egoverse \
   --repo-id     lerobot/pick_and_place_left_egoverse \
-  --arm         left
+  --arm         left \
+  --chunk-length 45 \
+  --point-gap 1
 
 # Restore missing video columns 
 python egomimic/scripts/viperx_process/fix_episodes_metadata.py
 ```
+
+The converter now trims terminal reset/foldback segments by default. This matters:
+if the demonstration includes a reset after the useful manipulation, long future
+action chunks teach the policy to return home just before or after contact.
+
+Useful reset-trim controls:
+
+```bash
+--reset-shoulder-max -70 \
+--reset-elbow-min 75 \
+--reset-min-run 12 \
+--reset-trim-extra-frames 30
+```
+
+Use `--no-trim-terminal-reset` only for diagnostics or for datasets where the
+terminal reset is intentionally part of the task.
+
+After these converter changes, regenerate the ViperX EgoVerse dataset and retrain.
+Old checkpoints were trained on the old chunk/normalization behavior.
 
 ### Training Run
 ## Available training modalities
@@ -210,7 +233,7 @@ python egomimic/trainHydra.py \
 
 This run uses two datasets at each training step:
 
-- `viperx_right_arm`: local LeRobot data, action key `actions_joints`, shape `(64, 7)`.
+- `viperx_right_arm`: local LeRobot data, action key `actions_joints`, shape `(45, 7)`.
 - `viperx_left_arm`: same 7-DoF local format, but with `observation.images.left_wrist_img`.
 - `scale_bimanual`: Scale Zarr data, action key `actions_cartesian`, shape `(100, 12)`.
 
@@ -305,8 +328,8 @@ python egomimic/trainHydra.py \
   trainer.strategy=ddp_find_unused_parameters_true \
   data.train_datasets.viperx_right_arm.folder_path=/data/sybeuret/remote_data_lerobot/egoverse_data \
   data.valid_datasets.viperx_right_arm.folder_path=/data/sybeuret/remote_data_lerobot/egoverse_data \
-  data.train_datasets.aria_right_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data \
-  data.valid_datasets.aria_right_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data \
+  data.train_datasets.aria_left_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data \
+  data.valid_datasets.aria_left_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data \
   data.train_datasets.scale_bimanual.resolver.folder_path=/data/sybeuret/scale_zarr_cache \
   data.valid_datasets.scale_bimanual.resolver.folder_path=/data/sybeuret/scale_zarr_cache \
   data.train_datasets.scale_bimanual.resolver.max_episodes=500 \
@@ -360,7 +383,7 @@ du -sh /data/sybeuret/scale_zarr_cache
 
 ```yaml
 norm_stat_fraction: 0.01
-norm_stat_max_samples: 512
+norm_stat_max_samples: 2048
 ```
 
 `norm_stat_fraction` is the fraction of the frame-level dataset to sample.
@@ -371,6 +394,11 @@ key, not per episode. For Scale, the transformed keys are currently
 When debugging, use a smaller cap such as `128` or `256`. Once training works,
 increase `max_episodes` for more data diversity while keeping
 `norm_stat_max_samples` capped to avoid long startup times.
+
+The HPT normalizer accepts both schematic keys (`actions_joints`,
+`joint_positions`) and LeRobot column aliases (`actions.joints_act`,
+`observation.state`). This prevents ViperX tensors from passing through training
+in raw motor units while diffusion/flow matching expects normalized targets.
 
 ### Rollout / Inference
 
@@ -449,7 +477,7 @@ If you encounter errors during initialization, verify the following:
 - "Data not found" during NormStats inference: If debug logs report Skipping observation.state, double check string names. Note the difference between observation.(...) (singular) and observations.(...) (plural) in your YAML files versus info.json.
 - Slow `[NormStats] transformed ...`: Scale `state_ee_pose` and `actions_cartesian` are created by transforms, so norm statistics must sample frames and run the transform pipeline. Reduce `norm_stat_max_samples` for debugging.
 - Bursty training throughput: Remote Scale streaming reads from S3 in DataLoader workers. If CPU/network/GPU usage comes in peaks, cache a subset locally with `S3EpisodeResolver`, reduce Scale batch size, and use `persistent_workers`, `prefetch_factor`, and `pin_memory`.
-- Shape error in Scale action loss: Ensure Scale action heads use `action_horizon: 100`, `act_dim: 12`, and `ac_keys.scale_bimanual: actions_cartesian`. HPT should use per-domain head horizons, not the shared trunk horizon, when slicing actions.
+- Shape error in action loss: Ensure ViperX heads use `action_horizon: 45`, `act_dim: 7`, and `ac_keys.viperx_right_arm: actions_joints`; Scale heads use `action_horizon: 100`, `act_dim: 12`, and `ac_keys.scale_bimanual: actions_cartesian`. HPT should use per-domain head horizons, not the shared trunk horizon, when slicing actions.
 - LeRobot Driver Issues during Rollout: If ViperXInterface fails to connect, ensure no other python scripts are grabbing the camera feed or serial ports simultaneously.
 
 ---
@@ -465,4 +493,4 @@ EgoVerse is designed to scale dynamically across diverse datasets and embodiment
 
 
 
-EGOVERSE_DEBUG_LOSS_THRESHOLD=100000 RUN_LOCAL=0 RUN_ARIA=0 RUN_CACHED=1 RUN_STREAMING=0 SCALE_EPISODES=500 CACHE_DIR=/data/sybeuret/scale_zarr_cache bash scripts/run_viperx_experiments.sh
+USE_MIX_SCHEDULE=1 START_AT=3 END_AT=3 SCALE_EPISODES_LARGE=2000 SCALE_CACHE_DIR=/data/sybeuret/scale_zarr_cache bash egomimic/robot/viperx/run_viperx_aria_ablations.sh
