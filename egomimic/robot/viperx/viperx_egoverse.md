@@ -208,7 +208,7 @@ workers, but validation is intentionally conservative (`num_workers=0`) because
 PyAV/torchvision video decoding can hang in worker processes when validation
 starts late in a long run. `trainer=single_gpu` also caps validation to 20
 batches, which is enough to monitor loss while avoiding a fragile long
-validation sweep. Checkpoints are saved every 10 epochs, independent of the
+validation sweep. Checkpoints are saved every 100 epochs, independent of the
 validation interval, so a late validation failure should leave a recent
 `checkpoints/last.ckpt`.
 

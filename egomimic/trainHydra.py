@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
 import lightning as L
+import torch
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
@@ -72,6 +73,37 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         set_global_seed(cfg.seed)
     else:
         raise ValueError("Seed must be provided in cfg for reproducibility!")
+
+    sharing_strategy = os.environ.get("EGOVERSE_MP_SHARING_STRATEGY", "file_system")
+    if sharing_strategy:
+        try:
+            torch.multiprocessing.set_sharing_strategy(sharing_strategy)
+            log.info(
+                f"Set torch multiprocessing sharing strategy to {sharing_strategy!r}."
+            )
+        except RuntimeError as exc:
+            log.warning(
+                f"Could not set torch multiprocessing sharing strategy "
+                f"to {sharing_strategy!r}: {exc}"
+            )
+
+    matmul_precision = os.environ.get("EGOVERSE_MATMUL_PRECISION", "high").lower()
+    if matmul_precision in {"highest", "high", "medium"}:
+        torch.set_float32_matmul_precision(matmul_precision)
+        log.info(f"Set torch float32 matmul precision to {matmul_precision!r}.")
+    elif matmul_precision not in {"", "none", "false", "0"}:
+        log.warning(
+            f"Ignoring invalid EGOVERSE_MATMUL_PRECISION={matmul_precision!r}; "
+            "expected one of highest/high/medium."
+        )
+
+    if os.environ.get("EGOVERSE_CUDNN_BENCHMARK", "1").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        torch.backends.cudnn.benchmark = True
+        log.info("Enabled torch.backends.cudnn.benchmark.")
 
     load_env()
     # log.info(f"Instantiating data schematic <{cfg.data_schematic._target_}>")
@@ -224,7 +256,22 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if cfg.get("train"):
         log.info("Starting training!")
-        trainer.fit(model=model, datamodule=datamodule, ckpt_path=cfg.get("ckpt_path"))
+        fit_kwargs = {
+            "model": model,
+            "datamodule": datamodule,
+            "ckpt_path": cfg.get("ckpt_path"),
+        }
+        if cfg.get("ckpt_path"):
+            weights_only = os.environ.get(
+                "EGOVERSE_RESUME_WEIGHTS_ONLY", "0"
+            ).lower() in {"1", "true", "yes"}
+            fit_kwargs["weights_only"] = weights_only
+            log.info(
+                "Resuming from checkpoint with "
+                f"weights_only={weights_only}. "
+                "Use EGOVERSE_RESUME_WEIGHTS_ONLY=1 for weights-only loading."
+            )
+        trainer.fit(**fit_kwargs)
 
     if cfg.get("eval"):
         eval: Eval = hydra.utils.instantiate(
