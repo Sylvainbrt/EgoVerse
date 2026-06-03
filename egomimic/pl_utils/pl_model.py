@@ -94,8 +94,13 @@ class ModelWrapper(LightningModule):
         value = os.environ.get("EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS")
         if value is None:
             return None
+        if value.strip().lower() in {"", "0", "false", "no", "none", "off"}:
+            return None
         try:
-            return float(value)
+            threshold = float(value)
+            if threshold <= 0:
+                return None
+            return threshold
         except ValueError:
             if self._is_global_zero():
                 print(

@@ -1,5 +1,6 @@
 import copy
 import os
+import resource
 import signal
 from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple
@@ -55,6 +56,33 @@ def _dataset_cfg_with_skip_videos(dataset_cfg: DictConfig) -> DictConfig:
     return dataset_cfg
 
 
+def _env_value_is_enabled(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "none", "off"}
+
+
+def _raise_open_file_limit() -> None:
+    target_value = os.environ.get("EGOVERSE_NOFILE_LIMIT", "65536")
+    try:
+        target = int(target_value)
+    except ValueError:
+        log.warning(f"Ignoring invalid EGOVERSE_NOFILE_LIMIT={target_value!r}.")
+        return
+
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard != resource.RLIM_INFINITY:
+            target = min(target, hard)
+        if soft < target:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        log.info(f"Open-file limit: soft={soft}, hard={hard}.")
+    except (OSError, ValueError) as exc:
+        log.warning(f"Could not raise open-file limit: {exc}")
+
+
 @task_wrapper
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
@@ -73,6 +101,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         set_global_seed(cfg.seed)
     else:
         raise ValueError("Seed must be provided in cfg for reproducibility!")
+
+    _raise_open_file_limit()
 
     sharing_strategy = os.environ.get("EGOVERSE_MP_SHARING_STRATEGY", "file_system")
     if sharing_strategy:
@@ -206,7 +236,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     log.info("Instantiating loggers...")
     logger: List[Logger] = instantiate_loggers(cfg.get("logger"))
 
-    if os.environ.get("EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS") is not None:
+    if _env_value_is_enabled("EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS"):
         OmegaConf.update(
             cfg,
             "trainer.reload_dataloaders_every_n_epochs",

@@ -49,6 +49,15 @@ die() {
   exit 1
 }
 
+env_value_enabled() {
+  local value="${1:-}"
+  [[ -n "${value}" ]] || return 1
+  case "${value,,}" in
+    0|false|no|none|off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 in_range() {
   local step="$1"
   [[ "$step" -ge "$START_AT" && "$step" -le "$END_AT" ]]
@@ -89,7 +98,12 @@ run_training() {
   echo "Logger preset: ${LOGGER}"
   echo "Use mix schedule: ${USE_MIX_SCHEDULE}"
   echo "Mix schedule profile: ${MIX_SCHEDULE_PROFILE}"
-  echo "Scale auto-exclude max abs: ${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}"
+  local auto_exclude_value="${EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS-}"
+  if [[ -z "${auto_exclude_value}" && "${description}" == *"egoverse_cached"* ]]; then
+    auto_exclude_value="${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}"
+  fi
+
+  echo "Scale auto-exclude max abs: ${auto_exclude_value:-disabled}"
   echo "Dry run: ${DRY_RUN}"
   echo "============================================================"
   echo
@@ -133,8 +147,11 @@ run_training() {
     return
   fi
 
-  EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS="${EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS:-${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}}" \
-    "${cmd[@]}"
+  if env_value_enabled "${auto_exclude_value}"; then
+    EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS="${auto_exclude_value}" "${cmd[@]}"
+  else
+    env -u EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS "${cmd[@]}"
+  fi
 }
 
 if in_range 0; then
