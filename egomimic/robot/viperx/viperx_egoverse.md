@@ -187,7 +187,9 @@ python egomimic/trainHydra.py \
   data=viperx_local \
   model=hpt_bc_flow_viperx \
   logger=wandb \
-  trainer=ddp
+  trainer=single_gpu \
+  name=viperx_robot_only \
+  description=pick_place_220526_45step_pyav
 
 # Left-arm variant
 python egomimic/trainHydra.py \
@@ -195,8 +197,82 @@ python egomimic/trainHydra.py \
   data=viperx_local_left \
   model=hpt_bc_flow_viperx_left \
   logger=wandb \
-  trainer=ddp
+  trainer=single_gpu \
+  name=viperx_robot_only_left \
+  description=pick_place_220526_45step_pyav
 ```
+
+For local LeRobot video data, prefer `trainer=single_gpu` unless you are
+actually launching multiple GPUs. The ViperX local configs keep fast training
+workers, but validation is intentionally conservative (`num_workers=0`) because
+PyAV/torchvision video decoding can hang in worker processes when validation
+starts late in a long run. `trainer=single_gpu` also caps validation to 20
+batches, which is enough to monitor loss while avoiding a fragile long
+validation sweep. Checkpoints are saved every 10 epochs, independent of the
+validation interval, so a late validation failure should leave a recent
+`checkpoints/last.ckpt`.
+
+To resume a run after interruption or validation timeout:
+
+```bash
+python egomimic/trainHydra.py \
+  --config-name=train \
+  data=viperx_local \
+  model=hpt_bc_flow_viperx \
+  trainer=single_gpu \
+  logger=wandb \
+  name=viperx_robot_only \
+  description=pick_place_220526_45step_pyav_resume \
+  ckpt_path=/path/to/run/checkpoints/last.ckpt
+```
+
+Quick debug run with one training batch and one validation batch:
+
+```bash
+EGOVERSE_SKIP_VALIDATION_VIZ=1 python egomimic/trainHydra.py \
+  --config-name=train \
+  data=viperx_local \
+  model=hpt_bc_flow_viperx \
+  trainer=debug \
+  logger=debug \
+  name=debug_validation \
+  description=viperx_one_train_one_val \
+  trainer.limit_train_batches=1 \
+  trainer.limit_val_batches=1 \
+  trainer.check_val_every_n_epoch=1 \
+  data.train_datasets.viperx_right_arm.folder_path=/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data \
+  data.valid_datasets.viperx_right_arm.folder_path=/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data \
+  data.train_dataloader_params.viperx_right_arm.batch_size=1 \
+  data.valid_dataloader_params.viperx_right_arm.batch_size=1 \
+  data.train_dataloader_params.viperx_right_arm.num_workers=0 \
+  data.train_dataloader_params.viperx_right_arm.persistent_workers=false \
+  data.train_dataloader_params.viperx_right_arm.prefetch_factor=null \
+  data.train_dataloader_params.viperx_right_arm.pin_memory=false \
+  data.train_dataloader_params.viperx_right_arm.timeout=0
+```
+
+Two-run sequential sweep for the current ViperX setup:
+
+```bash
+bash scripts/run_viperx_2way_sequential.sh
+```
+
+This runs robot-only first, then robot + local Aria with scheduled mixing. The
+scheduled Aria run is preferred over plain Aria co-training because it lets Aria
+help early representation learning while annealing back toward ViperX action
+fitting near the end.
+
+Four-run broader sweep:
+
+```bash
+bash scripts/run_viperx_4way_sequential.sh
+```
+
+The four selected runs are robot-only baseline, robot + Aria scheduled,
+robot + Scale scheduled, and robot + Aria + Scale scheduled. The scheduled
+co-training variants are preferred over plain co-training because auxiliary
+data helps early representation learning but should not dominate late ViperX
+action fitting.
 
 ## Option B: Fine-Tuning from Pretrained EgoVerse Model (Recommended)
 

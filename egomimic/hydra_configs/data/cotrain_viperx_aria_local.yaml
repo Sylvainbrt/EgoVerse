@@ -6,6 +6,7 @@ train_datasets:
     folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
     embodiment: viperx_right_arm
     mode: train
+    video_backend: pyav
     camera_keys:
       - observation.images.front_img_1
       - observation.images.right_wrist_img
@@ -23,6 +24,7 @@ train_datasets:
     folder_path: /data/sybeuret/remote_aria_data/egoverse_data
     embodiment: aria_left_arm
     mode: train
+    video_backend: pyav
     camera_keys:
       - observations.images.front_img_1
     state_keys:
@@ -38,6 +40,7 @@ valid_datasets:
     folder_path: /data/sybeuret/remote_data_lerobot/egoverse_data
     embodiment: viperx_right_arm
     mode: valid
+    video_backend: pyav
     camera_keys:
       - observation.images.front_img_1
       - observation.images.right_wrist_img
@@ -55,6 +58,7 @@ valid_datasets:
     folder_path: /data/sybeuret/remote_aria_data/egoverse_data
     embodiment: aria_left_arm
     mode: valid
+    video_backend: pyav
     camera_keys:
       - observations.images.front_img_1
     state_keys:
@@ -68,14 +72,26 @@ train_dataloader_params:
   viperx_right_arm:
     batch_size: 8
     num_workers: 4
+    persistent_workers: true
+    prefetch_factor: 2
+    pin_memory: true
+    timeout: 120
   aria_left_arm:
     batch_size: 8
     num_workers: 4
+    persistent_workers: true
+    prefetch_factor: 2
+    pin_memory: true
+    timeout: 120
 
 valid_dataloader_params:
   viperx_right_arm:
     batch_size: 8
-    num_workers: 4
+    num_workers: 0
+    pin_memory: false
+    timeout: 0
   aria_left_arm:
     batch_size: 8
-    num_workers: 4
+    num_workers: 0
+    pin_memory: false
+    timeout: 0

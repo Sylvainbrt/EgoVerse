@@ -1369,8 +1369,13 @@ class HPT(Algo):
                     rkl = reverse_kl_from_samples(samples, gt_tensor)
                     metrics[f"Valid/{pred_key_name}_reverse_kl_M{M}"] = rkl.item()
 
-            ims = self.visualize_preds(preds, _batch)
-            images_dict[embodiment_id] = ims
+            if os.environ.get("EGOVERSE_SKIP_VALIDATION_VIZ", "0").lower() not in {
+                "1",
+                "true",
+                "yes",
+            }:
+                ims = self.visualize_preds(preds, _batch)
+                images_dict[embodiment_id] = ims
         return metrics, images_dict
 
     @override

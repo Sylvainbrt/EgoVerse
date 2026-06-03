@@ -59,6 +59,23 @@ class ModelWrapper(LightningModule):
             return True
         return bool(getattr(trainer, "is_global_zero", True))
 
+    def _sync_distributed(self, event: str):
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            print(
+                f"Rank {self.global_rank} on {event}, waiting for all ranks to synchronize",
+                flush=True,
+            )
+            torch.distributed.barrier()
+            print(
+                f"Rank {self.global_rank} on {event}, all ranks synchronized",
+                flush=True,
+            )
+        else:
+            print(
+                f"Rank {self.global_rank} on {event}, no distributed process group; skipping sync",
+                flush=True,
+            )
+
     def _debug_spike_threshold(self):
         value = os.environ.get("EGOVERSE_DEBUG_LOSS_THRESHOLD")
         if value is None:
@@ -569,15 +586,7 @@ class ModelWrapper(LightningModule):
 
             self.val_counter[key] = 0
             self.val_image_buffer[key] = []
-        print(
-            f"Rank {self.global_rank} on validation end, waiting for all ranks to synchronize",
-            flush=True,
-        )
-        torch.distributed.barrier()
-        print(
-            f"Rank {self.global_rank} on validation end, all ranks synchronized",
-            flush=True,
-        )
+        self._sync_distributed("validation end")
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Choose what optimizers and learning-rate schedulers to use in your optimization.
@@ -605,14 +614,7 @@ class ModelWrapper(LightningModule):
 
     def on_fit_start(self):
         self.model.device = self.device
-        print(
-            f"Rank {self.global_rank} on fit start, waiting for all ranks to synchronize",
-            flush=True,
-        )
-        torch.distributed.barrier()
-        print(
-            f"Rank {self.global_rank} on fit start, all ranks synchronized", flush=True
-        )
+        self._sync_distributed("fit start")
 
     def on_train_epoch_start(self):
         log_all = {}

@@ -1,0 +1,11 @@
+defaults:
+  - default
+
+strategy: auto
+accelerator: gpu
+devices: 1
+num_nodes: 1
+sync_batchnorm: False
+precision: bf16-mixed
+num_sanity_val_steps: 0
+limit_val_batches: 20

@@ -7,5 +7,5 @@ model_checkpoint:
   filename: "epoch_{epoch}"
   save_last: true
   save_top_k: -1
-  every_n_epochs: ${trainer.check_val_every_n_epoch}
+  every_n_epochs: 10
   save_on_train_epoch_end: true

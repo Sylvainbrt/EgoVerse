@@ -182,6 +182,19 @@ def _parse_split(split_val, total_episodes):
     return list(range(total_episodes))
 
 
+def _resolve_dataset_key_map(key_map=None, resolver=None):
+    """Support both flat key_map configs and legacy resolver.key_map configs."""
+    if key_map is not None:
+        return key_map
+    if resolver is None:
+        return None
+    if hasattr(resolver, "get"):
+        return resolver.get("key_map")
+    if hasattr(resolver, "key_map"):
+        return resolver.key_map
+    return None
+
+
 class RLDBDataset(LeRobotDataset):
     def __init__(
         self,
@@ -197,6 +210,7 @@ class RLDBDataset(LeRobotDataset):
         slow_down_factor: float = 1.0,
         task_string: str = "",
         annotation_df=None,
+        skip_videos: bool = False,
         **kwargs,
     ):
         dataset_meta = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
@@ -226,24 +240,28 @@ class RLDBDataset(LeRobotDataset):
         self.slow_down_factor = slow_down_factor  # <-- add
         self.task_string = task_string  # <-- add
         self.annotation_df = annotation_df  # <-- add
+        self.skip_videos = skip_videos
 
         if mode == "train":
             super().__init__(
                 repo_id=repo_id,
                 root=root,
                 episodes=train_indices,
+                **kwargs,
             )
         elif mode == "valid":
             super().__init__(
                 repo_id=repo_id,
                 root=root,
                 episodes=valid_indices,
+                **kwargs,
             )
         elif mode == "sample" and episodes is not None:
             super().__init__(
                 repo_id=repo_id,
                 root=root,
                 episodes=episodes,
+                **kwargs,
             )
         elif mode == "percent" and percent is not None:
             assert 0 < percent <= 1
@@ -251,6 +269,7 @@ class RLDBDataset(LeRobotDataset):
                 repo_id=repo_id,
                 root=root,
                 episodes=train_indices,
+                **kwargs,
             )
             total_frames = len(self)
             num_sampled_frames = int(percent * total_frames)
@@ -258,7 +277,7 @@ class RLDBDataset(LeRobotDataset):
                 random.sample(range(total_frames), num_sampled_frames)
             )
         else:
-            super().__init__(repo_id=repo_id, root=root)
+            super().__init__(repo_id=repo_id, root=root, **kwargs)
 
     def __len__(self):
         """Return the total number of sampled frames if in 'percent' mode, otherwise the full dataset size."""
@@ -266,11 +285,31 @@ class RLDBDataset(LeRobotDataset):
             return len(self.sampled_indices)
         return super().__len__()
 
+    def _getitem_without_videos(self, idx):
+        self._ensure_hf_dataset_loaded()
+        item = self.hf_dataset[idx]
+        ep_idx = item["episode_index"].item()
+
+        query_indices = None
+        if self.delta_indices is not None:
+            query_indices, padding = self._get_query_indices(idx, ep_idx)
+            query_result = self._query_hf_dataset(query_indices)
+            item = {**item, **padding}
+            for key, val in query_result.items():
+                item[key] = val
+
+        task_idx = item["task_index"].item()
+        item["task"] = self.meta.tasks.iloc[task_idx].name
+        return item
+
     def __getitem__(self, idx):
         """Fetch frames based on sampled indices in 'percent' mode, otherwise default to full dataset."""
         if self.sampled_indices is not None:
             idx = self.sampled_indices[idx]
-        item = super().__getitem__(idx)  # has video frames
+        if self.skip_videos:
+            item = self._getitem_without_videos(idx)
+        else:
+            item = super().__getitem__(idx)  # has video frames
 
         if self.use_task_string:
             item["high_level_language_prompt"] = self.task_string
@@ -499,8 +538,12 @@ class FolderRLDBDataset(MultiRLDBDataset):
         local_files_only=True,
         key_map=None,
         valid_ratio=0.2,
+        camera_keys=None,
+        resolver=None,
         **kwargs,
     ):
+        key_map = _resolve_dataset_key_map(key_map=key_map, resolver=resolver)
+
         folder_path = Path(folder_path)
         assert _safe_is_dir(folder_path), f"{folder_path} is not a valid directory."
         assert mode in ["train", "valid", "percent", "total"], f"Invalid mode: {mode}"
@@ -608,12 +651,16 @@ class S3RLDBDataset(MultiRLDBDataset):
         local_files_only=True,
         key_map=None,
         valid_ratio=0.2,
+        camera_keys=None,
+        resolver=None,
         temp_root="/coc/flash7/scratch/egoverseS3Dataset/S3_rldb_data",  # "/coc/flash7/scratch/rldb_temp"
         cache_root="/coc/flash7/scratch/.cache",
         filters={},
         debug=False,
         **kwargs,
     ):
+        key_map = _resolve_dataset_key_map(key_map=key_map, resolver=resolver)
+
         filters["robot_name"] = embodiment
         filters["is_deleted"] = False
 

@@ -9,7 +9,7 @@ import lightning as L
 from lightning import Callback, LightningDataModule, LightningModule, Trainer
 from lightning.pytorch.loggers import Logger
 from lightning.pytorch.plugins.environments import SLURMEnvironment
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 from tabulate import tabulate
 
 from egomimic.rldb.zarr.utils import DataSchematic, set_global_seed
@@ -45,6 +45,13 @@ def _log_dataset_frame_counts(train_datasets: dict, valid_datasets: dict) -> Non
         intfmt=",",
     )
     log.info("Dataset frame counts:\n" + table)
+
+
+def _dataset_cfg_with_skip_videos(dataset_cfg: DictConfig) -> DictConfig:
+    dataset_cfg = copy.deepcopy(dataset_cfg)
+    with open_dict(dataset_cfg):
+        dataset_cfg.skip_videos = True
+    return dataset_cfg
 
 
 @task_wrapper
@@ -97,7 +104,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     for dataset_name, dataset in datamodule.train_datasets.items():
         log.info(f"Inferring shapes for dataset <{dataset_name}>")
-        data_schematic.infer_shapes_from_batch(dataset[0])
+        # Avoid touching video decoders in the main process before DataLoader
+        # workers are created. LeRobot warns that this can poison worker-side
+        # video loading; for shape inference we only need proprio/action keys.
+        shape_dataset = hydra.utils.instantiate(
+            _dataset_cfg_with_skip_videos(cfg.data.train_datasets[dataset_name])
+        )
+        data_schematic.infer_shapes_from_batch(shape_dataset[0])
         # instantiate norm datasets which is same as dataset but with keymap without the image keys
         instantiate_copy = copy.deepcopy(cfg.data.train_datasets[dataset_name])
         # Support both config layouts:

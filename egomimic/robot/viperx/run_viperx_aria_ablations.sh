@@ -22,6 +22,7 @@ MIX_SCHEDULE_PROFILE="${MIX_SCHEDULE_PROFILE:-default}"
 
 SCALE_EPISODES_SMALL="${SCALE_EPISODES_SMALL:-500}"
 SCALE_EPISODES_LARGE="${SCALE_EPISODES_LARGE:-2000}"
+ROBOT_ONLY_MODEL="hpt_bc_flow_viperx"
 LOCAL_ARIA_MODEL="hpt_cotrain_viperx_aria"
 SCALE_MODEL="hpt_cotrain_viperx_aria_scale"
 ROBOT_SCALE_MODEL="hpt_cotrain_viperx_scale"
@@ -129,6 +130,14 @@ run_training() {
   EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS="${EGOVERSE_AUTO_EXCLUDE_ACTION_MAX_ABS:-${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS}}" \
     "${cmd[@]}"
 }
+
+if in_range 0; then
+  run_training \
+    "robot_only" \
+    0 \
+    data=viperx_local \
+    model="${ROBOT_ONLY_MODEL}"
+fi
 
 if in_range 1; then
   run_training \
