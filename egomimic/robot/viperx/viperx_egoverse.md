@@ -165,6 +165,75 @@ terminal reset is intentionally part of the task.
 After these converter changes, regenerate the ViperX EgoVerse dataset and retrain.
 Old checkpoints were trained on the old chunk/normalization behavior.
 
+### Convert Local Aria Human Demonstrations
+
+This step is required for the `data=cotrain_viperx_aria_local` runs. The
+historical EgoVerse `data_processing.md` flow was:
+
+1. Collect Project Aria demonstrations with the Aria app.
+2. Run Aria Machine Perception Services (MPS).
+3. Convert the VRS + MPS output into a LeRobot/RLDB parquet dataset with
+   `aria_to_lerobot.py`.
+
+Expected raw folder layout:
+
+```text
+TASK_NAME_ARIA/
+├── rawAria/
+│   ├── demo1.vrs
+│   ├── demo1.vrs.json
+│   ├── mps_demo1_vrs/
+│   │   ├── hand_tracking/
+│   │   └── slam/
+│   ├── demo2.vrs
+│   ├── demo2.vrs.json
+│   └── mps_demo2_vrs/
+└── converted/
+```
+
+Run MPS first. This command comes from the older EgoVerse data-processing notes:
+
+```bash
+aria_mps single -i /path/to/TASK_NAME_ARIA/rawAria
+```
+
+After MPS finishes, convert the local Aria human demos to the LeRobot format used
+by ViperX co-training:
+
+```bash
+cd /data/sybeuret/codes/EgoVerse
+conda activate egoverse
+
+python egomimic/scripts/aria_process/aria_to_lerobot.py \
+  --raw-path /path/to/TASK_NAME_ARIA/rawAria \
+  --dataset-repo-id lerobot/aria_egoverse_data \
+  --arm left \
+  --fps 30 \
+  --video-encoding false \
+  --push false \
+  --name egoverse_data \
+  --prestack true \
+  --output-dir /data/sybeuret/remote_aria_data \
+  --description "<task-description>"
+```
+
+This writes the dataset to:
+
+```text
+/data/sybeuret/remote_aria_data/egoverse_data
+```
+
+That path matches the current `cotrain_viperx_aria_local.yaml` config:
+
+```yaml
+data.train_datasets.aria_left_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data
+data.valid_datasets.aria_left_arm.folder_path=/data/sybeuret/remote_aria_data/egoverse_data
+```
+
+Use `--arm left` for the current ViperX right-arm + Aria left-hand co-training
+configs. For other Aria datasets, the current script accepts `left`, `right`, and
+`bimanual`; older notes sometimes wrote this as `both`.
+
 ### Training Run
 ## Available training modalities
 
