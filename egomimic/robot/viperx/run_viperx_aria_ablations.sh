@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EGOVERSE_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-ROBOT_DATA_DIR="${ROBOT_DATA_DIR:-/data/sybeuret/remote_data_lerobot/egoverse_data}"
+ROBOT_DATA_DIR="${ROBOT_DATA_DIR:-/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data_aligned}"
 ARIA_DATA_DIR="${ARIA_DATA_DIR:-/data/sybeuret/aria_gen2_data/egoverse_data}"
 SCALE_CACHE_DIR="${SCALE_CACHE_DIR:-/tmp/scale_zarr_cache}"
 SCALE_MANIFEST_PATH="${SCALE_MANIFEST_PATH:-/data/sybeuret/scale_2000_manifest.json}"

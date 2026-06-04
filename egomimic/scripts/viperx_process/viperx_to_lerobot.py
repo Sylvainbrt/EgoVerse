@@ -11,7 +11,7 @@ Updates info.json robot_type to "viperx_right_arm" or "viperx_left_arm".
 Usage:
     python viperx_to_lerobot.py \
         --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
-        --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
+        --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data_trimmed/pick_and_place_egoverse \
         --repo-id     lerobot/pick_and_place_egoverse
         --arm         right
 """
@@ -23,11 +23,13 @@ import shutil
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from egomimic.rldb.embodiment.embodiment import EMBODIMENT
-from egomimic.scripts.viperx_process.fix_episodes_metadata import fix_episodes_metadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,7 +43,9 @@ RESET_SHOULDER_MAX = -70.0
 RESET_ELBOW_MIN = 75.0
 RESET_MIN_RUN = 12
 RESET_TRIM_EXTRA_FRAMES = 30
+RESET_INITIAL_TRIM_EXTRA_FRAMES = 0
 RESET_MIN_KEEP_FRAMES = 30
+TRIM_INITIAL_RESET = False
 
 
 def get_future_points(
@@ -59,6 +63,44 @@ def get_future_points(
     return arr[all_idx]  # (T, chunk_length, D)
 
 
+def is_reset_like(
+    joints_7dof: np.ndarray,
+    shoulder_max: float = RESET_SHOULDER_MAX,
+    elbow_min: float = RESET_ELBOW_MIN,
+) -> np.ndarray:
+    return (joints_7dof[:, 1] <= shoulder_max) & (joints_7dof[:, 2] >= elbow_min)
+
+
+def find_initial_reset_trim_start(
+    joints_7dof: np.ndarray,
+    shoulder_max: float = RESET_SHOULDER_MAX,
+    elbow_min: float = RESET_ELBOW_MIN,
+    min_run: int = RESET_MIN_RUN,
+    extra_frames: int = RESET_INITIAL_TRIM_EXTRA_FRAMES,
+    min_keep_frames: int = RESET_MIN_KEEP_FRAMES,
+) -> int:
+    """Return the first frame to keep after removing an initial reset segment."""
+    if len(joints_7dof) == 0:
+        return 0
+
+    reset_like = is_reset_like(joints_7dof, shoulder_max, elbow_min)
+    if not reset_like[0]:
+        return 0
+
+    end = 0
+    while end < len(joints_7dof) and reset_like[end]:
+        end += 1
+
+    run_len = end
+    if run_len < min_run:
+        return 0
+
+    trim_start = min(len(joints_7dof), end + extra_frames)
+    if len(joints_7dof) - trim_start < min_keep_frames:
+        return 0
+    return trim_start
+
+
 def find_terminal_reset_trim_end(
     joints_7dof: np.ndarray,
     shoulder_max: float = RESET_SHOULDER_MAX,
@@ -71,7 +113,7 @@ def find_terminal_reset_trim_end(
     if len(joints_7dof) == 0:
         return 0
 
-    reset_like = (joints_7dof[:, 1] <= shoulder_max) & (joints_7dof[:, 2] >= elbow_min)
+    reset_like = is_reset_like(joints_7dof, shoulder_max, elbow_min)
     reset_indices = np.flatnonzero(reset_like)
     if len(reset_indices) == 0:
         return len(joints_7dof)
@@ -120,6 +162,73 @@ ARM_TO_EMBODIMENT = {
 }
 
 
+def scalar(value):
+    if isinstance(value, (list, tuple)) and len(value) == 1:
+        return scalar(value[0])
+    if isinstance(value, np.ndarray):
+        if value.shape == ():
+            return value.item()
+        if value.size == 1:
+            return value.reshape(-1)[0].item()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except ValueError:
+            pass
+    return value
+
+
+def patch_video_metadata_from_source(
+    output_path: Path,
+    src: LeRobotDataset,
+    video_keys: list[str],
+    trim_starts: list[int],
+    kept_lengths: list[int],
+):
+    """Restore copied-video metadata and account for rows trimmed from episode starts."""
+    if not video_keys:
+        return
+
+    episode_files = sorted((output_path / "meta" / "episodes").rglob("*.parquet"))
+    if not episode_files:
+        raise FileNotFoundError(
+            f"No episode metadata parquet files found under {output_path}"
+        )
+
+    for ep_file in episode_files:
+        df = pd.read_parquet(ep_file)
+        for row_idx, row in df.iterrows():
+            ep_idx = int(row["episode_index"])
+            src_ep = src.meta.episodes[ep_idx]
+            trim_start = trim_starts[ep_idx]
+            kept_len = kept_lengths[ep_idx]
+
+            for video_key in video_keys:
+                chunk_col = f"videos/{video_key}/chunk_index"
+                file_col = f"videos/{video_key}/file_index"
+                from_col = f"videos/{video_key}/from_timestamp"
+                to_col = f"videos/{video_key}/to_timestamp"
+
+                src_from = float(scalar(src_ep.get(from_col, 0.0)))
+                df.at[row_idx, chunk_col] = int(scalar(src_ep.get(chunk_col, 0)))
+                df.at[row_idx, file_col] = int(scalar(src_ep.get(file_col, 0)))
+                df.at[row_idx, from_col] = src_from + (trim_start / src.fps)
+                df.at[row_idx, to_col] = src_from + ((trim_start + kept_len) / src.fps)
+
+        # Keep LeRobot's video metadata dtypes intact. If these columns become
+        # float, path formatting later fails on "{file_index:06d}".
+        for video_key in video_keys:
+            for col in (
+                f"videos/{video_key}/chunk_index",
+                f"videos/{video_key}/file_index",
+            ):
+                if col in df.columns:
+                    df[col] = df[col].astype("int64")
+
+        table = pa.Table.from_pandas(df, preserve_index=False)
+        pq.write_table(table, ep_file, compression="snappy")
+
+
 def convert(
     input_path: Path,
     output_path: Path,
@@ -127,10 +236,12 @@ def convert(
     arm: str,
     point_gap: int = POINT_GAP,
     chunk_length: int = CHUNK_LENGTH,
+    trim_initial_reset: bool = TRIM_INITIAL_RESET,
     trim_terminal_reset: bool = True,
     reset_shoulder_max: float = RESET_SHOULDER_MAX,
     reset_elbow_min: float = RESET_ELBOW_MIN,
     reset_min_run: int = RESET_MIN_RUN,
+    initial_reset_trim_extra_frames: int = RESET_INITIAL_TRIM_EXTRA_FRAMES,
     reset_trim_extra_frames: int = RESET_TRIM_EXTRA_FRAMES,
     reset_min_keep_frames: int = RESET_MIN_KEEP_FRAMES,
 ):
@@ -233,6 +344,10 @@ def convert(
     # ── 4. Iterate episodes ───────────────────────────────────────────────────
     num_episodes = src.num_episodes
     logger.info(f"Converting {num_episodes} episodes...")
+    episode_source_lengths: list[int] = []
+    episode_trim_starts: list[int] = []
+    episode_terminal_drops: list[int] = []
+    episode_kept_lengths: list[int] = []
 
     for ep_idx in range(num_episodes):
         logger.info(f"  Episode {ep_idx}/{num_episodes - 1}")
@@ -244,10 +359,35 @@ def convert(
         # Load raw arrays for this episode
         actions_9dof = np.array(ep_data["action"])  # (T, 9)
         state_9dof = np.array(ep_data["observation.state"])  # (T, 9)
+        original_len = len(actions_9dof)
 
         # Process
         action_7dof = actions_9dof[:, VIPERX_KEEP_INDICES]
         state_7dof_obs = state_9dof[:, VIPERX_KEEP_INDICES]  # (T, 7)
+        trim_start = 0
+        if trim_initial_reset:
+            trim_start = find_initial_reset_trim_start(
+                state_7dof_obs,
+                shoulder_max=reset_shoulder_max,
+                elbow_min=reset_elbow_min,
+                min_run=reset_min_run,
+                extra_frames=initial_reset_trim_extra_frames,
+                min_keep_frames=reset_min_keep_frames,
+            )
+            if trim_start > 0:
+                logger.info(
+                    "    Trimming initial reset: drop %d/%d frames "
+                    "(shoulder<=%.1f, elbow>=%.1f, extra=%d)",
+                    trim_start,
+                    len(action_7dof),
+                    reset_shoulder_max,
+                    reset_elbow_min,
+                    initial_reset_trim_extra_frames,
+                )
+                action_7dof = action_7dof[trim_start:]
+                state_7dof_obs = state_7dof_obs[trim_start:]
+                frame_indices = frame_indices[trim_start:]
+
         if trim_terminal_reset:
             trim_end = find_terminal_reset_trim_end(
                 action_7dof,
@@ -271,6 +411,11 @@ def convert(
                 state_7dof_obs = state_7dof_obs[:trim_end]
                 frame_indices = frame_indices[:trim_end]
 
+        episode_source_lengths.append(original_len)
+        episode_trim_starts.append(trim_start)
+        episode_terminal_drops.append(original_len - trim_start - len(action_7dof))
+        episode_kept_lengths.append(len(action_7dof))
+
         action_7dof, joints_act_chunk = process_episode(
             action_7dof,
             point_gap=point_gap,
@@ -293,6 +438,14 @@ def convert(
             dst.add_frame(frame)
 
         dst.save_episode()
+
+    logger.info(
+        "Trim summary: source=%d, initial_drop=%d, terminal_drop=%d, kept=%d",
+        sum(episode_source_lengths),
+        sum(episode_trim_starts),
+        sum(episode_terminal_drops),
+        sum(episode_kept_lengths),
+    )
 
     dst.finalize()
     logger.info("Done. Finalization complete.")
@@ -321,8 +474,19 @@ def convert(
     logger.info(f"features: {list(info['features'].keys())}")
 
     if src_videos.exists():
-        logger.info("Adding missing video metadata to episodes parquet...")
-        fix_episodes_metadata(output_path)
+        logger.info("Restoring video metadata from source dataset...")
+        video_keys = [
+            k
+            for k, v in src_features.items()
+            if isinstance(v, dict) and v.get("dtype") == "video"
+        ]
+        patch_video_metadata_from_source(
+            output_path,
+            src,
+            video_keys,
+            episode_trim_starts,
+            episode_kept_lengths,
+        )
 
 
 def main():
@@ -355,23 +519,36 @@ def main():
         action="store_false",
         help="Keep terminal reset/foldback frames instead of trimming them.",
     )
+    initial_trim_group = parser.add_mutually_exclusive_group()
+    initial_trim_group.add_argument(
+        "--trim-initial-reset",
+        dest="trim_initial_reset",
+        action="store_true",
+        help="Trim initial reset/folded frames.",
+    )
+    initial_trim_group.add_argument(
+        "--no-trim-initial-reset",
+        dest="trim_initial_reset",
+        action="store_false",
+        help="Keep initial reset/folded frames.",
+    )
     parser.add_argument(
         "--reset-shoulder-max",
         type=float,
         default=RESET_SHOULDER_MAX,
-        help="Shoulder threshold for terminal reset detection.",
+        help="Shoulder threshold for reset detection.",
     )
     parser.add_argument(
         "--reset-elbow-min",
         type=float,
         default=RESET_ELBOW_MIN,
-        help="Elbow threshold for terminal reset detection.",
+        help="Elbow threshold for reset detection.",
     )
     parser.add_argument(
         "--reset-min-run",
         type=int,
         default=RESET_MIN_RUN,
-        help="Minimum contiguous reset-like frames required at the episode end.",
+        help="Minimum contiguous reset-like frames required for trimming.",
     )
     parser.add_argument(
         "--reset-trim-extra-frames",
@@ -380,11 +557,18 @@ def main():
         help="Extra frames to trim before the detected terminal reset segment.",
     )
     parser.add_argument(
+        "--initial-reset-trim-extra-frames",
+        type=int,
+        default=RESET_INITIAL_TRIM_EXTRA_FRAMES,
+        help="Extra frames to trim after the detected initial reset segment.",
+    )
+    parser.add_argument(
         "--reset-min-keep-frames",
         type=int,
         default=RESET_MIN_KEEP_FRAMES,
         help="Do not trim an episode below this many frames.",
     )
+    parser.set_defaults(trim_initial_reset=TRIM_INITIAL_RESET)
     args = parser.parse_args()
     convert(
         args.input_path,
@@ -393,10 +577,12 @@ def main():
         args.arm,
         point_gap=args.point_gap,
         chunk_length=args.chunk_length,
+        trim_initial_reset=args.trim_initial_reset,
         trim_terminal_reset=args.trim_terminal_reset,
         reset_shoulder_max=args.reset_shoulder_max,
         reset_elbow_min=args.reset_elbow_min,
         reset_min_run=args.reset_min_run,
+        initial_reset_trim_extra_frames=args.initial_reset_trim_extra_frames,
         reset_trim_extra_frames=args.reset_trim_extra_frames,
         reset_min_keep_frames=args.reset_min_keep_frames,
     )
