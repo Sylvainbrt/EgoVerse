@@ -539,6 +539,7 @@ class FolderRLDBDataset(MultiRLDBDataset):
         key_map=None,
         valid_ratio=0.2,
         camera_keys=None,
+        state_keys=None,
         resolver=None,
         **kwargs,
     ):
@@ -652,6 +653,7 @@ class S3RLDBDataset(MultiRLDBDataset):
         key_map=None,
         valid_ratio=0.2,
         camera_keys=None,
+        state_keys=None,
         resolver=None,
         temp_root="/coc/flash7/scratch/egoverseS3Dataset/S3_rldb_data",  # "/coc/flash7/scratch/rldb_temp"
         cache_root="/coc/flash7/scratch/.cache",
