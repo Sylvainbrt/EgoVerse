@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EGOVERSE_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-ROBOT_DATA_DIR="${ROBOT_DATA_DIR:-/data/sybeuret/remote_data_lerobot/egoverse_data}"
-ARIA_DATA_DIR="${ARIA_DATA_DIR:-/data/sybeuret/aria_gen2_data/egoverse_data}"
-SCALE_CACHE_DIR="${SCALE_CACHE_DIR:-/tmp/scale_zarr_cache}"
+ROBOT_DATA_DIR="${ROBOT_DATA_DIR:-/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data_notrim}"
+ARIA_DATA_DIR="${ARIA_DATA_DIR:-/data/sybeuret/remote_aria_gen2_data/egoverse_data}"
+SCALE_CACHE_DIR="${SCALE_CACHE_DIR:-/data/sybeuret/remote_tmp_scale}"
 SCALE_MANIFEST_PATH="${SCALE_MANIFEST_PATH:-/data/sybeuret/scale_2000_manifest.json}"
 SCALE_MANIFEST_LOCAL_ONLY="${SCALE_MANIFEST_LOCAL_ONLY:-0}"
 SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS="${SCALE_AUTO_EXCLUDE_ACTION_MAX_ABS:-100.0}"
@@ -15,7 +15,7 @@ LOGGER="${LOGGER:-wandb}"
 TRAINER="${TRAINER:-single_gpu}"
 RUN_NAME="${RUN_NAME:-viperx_aria_ablation}"
 START_AT="${START_AT:-1}"
-END_AT="${END_AT:-4}"
+END_AT="${END_AT:-5}"
 DRY_RUN="${DRY_RUN:-0}"
 USE_MIX_SCHEDULE="${USE_MIX_SCHEDULE:-0}"
 MIX_SCHEDULE_PROFILE="${MIX_SCHEDULE_PROFILE:-default}"
@@ -198,6 +198,19 @@ if in_range 3; then
 fi
 
 if in_range 4; then
+  mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
+  run_training \
+    "robot_plus_egoverse_cached_500${RUN_SUFFIX}" \
+    0 \
+    data=cotrain_viperx_scale \
+    model="${ROBOT_SCALE_MODEL}" \
+    trainer.strategy=ddp_find_unused_parameters_true \
+    data.train_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_SMALL}" \
+    data.valid_datasets.scale_bimanual.resolver.max_episodes="${SCALE_EPISODES_SMALL}" \
+    "${SCALE_OVERRIDES[@]}"
+fi
+
+if in_range 5; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
     "robot_plus_egoverse_cached_2000${RUN_SUFFIX}" \

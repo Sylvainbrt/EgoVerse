@@ -56,7 +56,7 @@ Original recorded dataset at:
 - **`egomimic/rldb/embodiment/viperx.py`**: Created `ViperX` mapping class defining `get_keymap()` and image formats (`[B, C, H, W]`).
 
 ### 2. Dataset Processing
-- **`egomimic/scripts/viperx_process/viperx_to_lerobot.py`**: Handles filtering out shadow joints (indices 2 and 4), converting from 9-DoF to 7-DoF, adding the embodiment enum to parquet, chunking actions (`45` points, `point_gap=1`), trimming terminal reset/foldback frames, and rewriting metadata.
+- **`egomimic/scripts/viperx_process/viperx_to_lerobot.py`**: Handles filtering out shadow joints (indices 2 and 4), converting from 9-DoF to 7-DoF, adding the embodiment enum to parquet, chunking actions (`45` points, `point_gap=1`), trimming terminal reset/foldback frames, preserving copied-video timestamps, and rewriting metadata. Initial reset trimming is available as an opt-in ablation.
 - **`egomimic/scripts/viperx_process/fix_episodes_metadata.py`**: Repairs video metadata lost or mangled during Pandas/Parquet conversions.
 
 ### 3. HPT Hydra Configs
@@ -127,7 +127,7 @@ cd /data/sybeuret/codes/EgoVerse
 
 python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --input-path  /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place \
-  --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/pick_and_place_egoverse \
+  --output-path /data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data_aligned/pick_and_place_egoverse \
   --repo-id     lerobot/pick_and_place_egoverse \
   --arm         right \
   --chunk-length 45 \
@@ -142,13 +142,27 @@ python egomimic/scripts/viperx_process/viperx_to_lerobot.py \
   --chunk-length 45 \
   --point-gap 1
 
-# Restore missing video columns 
-python egomimic/scripts/viperx_process/fix_episodes_metadata.py
+# Put trimmed data in a separate parent folder. FolderRLDBDataset loads every
+# dataset subfolder under folder_path, so do not mix old and trimmed conversions
+# under the same egoverse_data parent.
 ```
 
-The converter now trims terminal reset/foldback segments by default. This matters:
-if the demonstration includes a reset after the useful manipulation, long future
-action chunks teach the policy to return home just before or after contact.
+The converter trims terminal reset/foldback segments by default. This preserves
+the same useful frame count as the earlier ViperX conversion, while fixing the
+important video metadata issue: copied videos keep the source chunk/file and
+timestamp offsets, so camera frames stay aligned with state/action rows. The old
+conversion copied the video files but effectively reset per-episode video
+metadata to local zero-based paths/timestamps. For LeRobot datasets whose videos
+are stored with cumulative `from_timestamp` offsets, this made the model train
+on images from the wrong time while actions/states came from the current row.
+That mismatch looked like bad learning or a policy returning to rest, even when
+the action chunks and normalization were otherwise plausible.
+Regenerate any `egoverse_data_aligned` dataset created before this metadata fix:
+pre-fix episode parquet files can contain float `chunk_index` / `file_index`
+values, which LeRobot rejects when formatting video paths.
+
+Initial reset trimming is intentionally opt-in. It removes more data and should
+be tested as an ablation, not used as the first retraining baseline.
 
 Useful reset-trim controls:
 
@@ -156,14 +170,17 @@ Useful reset-trim controls:
 --reset-shoulder-max -70 \
 --reset-elbow-min 75 \
 --reset-min-run 12 \
+--trim-initial-reset \
+--initial-reset-trim-extra-frames 0 \
 --reset-trim-extra-frames 30
 ```
 
-Use `--no-trim-terminal-reset` only for diagnostics or for datasets where the
-terminal reset is intentionally part of the task.
+Use `--no-trim-terminal-reset` only for diagnostics or for datasets where reset
+motion is intentionally part of the task.
 
 After these converter changes, regenerate the ViperX EgoVerse dataset and retrain.
-Old checkpoints were trained on the old chunk/normalization behavior.
+Old checkpoints were trained on the old conversion behavior; do a clean
+from-scratch robot-only run before using any old checkpoint for fine-tuning.
 
 ### Convert Local Aria Human Demonstrations
 
@@ -258,7 +275,9 @@ python egomimic/trainHydra.py \
   logger=wandb \
   trainer=single_gpu \
   name=viperx_robot_only \
-  description=pick_place_220526_45step_pyav
+  description=pick_place_220526_45step_aligned_pyav \
+  data.train_datasets.viperx_right_arm.folder_path=/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data_aligned \
+  data.valid_datasets.viperx_right_arm.folder_path=/data/sybeuret/.local/huggingface/lerobot/lerobot/egoverse_data_aligned
 
 # Left-arm variant
 python egomimic/trainHydra.py \
@@ -608,6 +627,57 @@ commands explicitly:
 ```bash
 # Same command as above, plus:
 --send_actions
+```
+
+Current better live settings for the robot-only aligned run:
+
+```bash
+cd /data/sybeuret/codes/lerobot
+conda activate egoverse_infer
+
+EGOVERSE_ROOT=/data/sybeuret/codes/EgoVerse \
+python src/lerobot/scripts/lerobot_egoverse_inference.py \
+  --ckpt_path /data/sybeuret/codes/EgoVerse/logs/viperx_aria_ablation/robot_only_2026-06-04_09-48-48/checkpoints/last.ckpt \
+  --robot.type=viperx \
+  --robot.port=/dev/ttyDXL_follower_left \
+  --robot.id=left_follower \
+  --robot.calibration_dir=/data/sybeuret/codes/lerobot/config/viperx-robot \
+  --robot.max_relative_target=5.0 \
+  --robot.cameras='{
+    "front_img_1": {
+      "type": "aria",
+      "streaming_interface": "usb",
+      "device_serial": "1M0YDD5H9F0364",
+      "warmup_s": 5.0,
+      "fps": 30,
+      "width": 640,
+      "height": 480
+    },
+    "right_wrist_img": {
+      "type": "intelrealsense",
+      "serial_number_or_name": "218622276584",
+      "color_mode": "RGB",
+      "use_depth": true,
+      "rotation": 0,
+      "warmup_s": 5,
+      "fps": 30,
+      "width": 640,
+      "height": 480
+    }
+  }' \
+  --fps 30 \
+  --query_frequency 25 \
+  --send_actions \
+  --max_steps 0 \
+  --log_commands \
+  --log_action_chunks \
+  --alpha 0.5 \
+  --resampled_action_len 45 \
+  --max_arm_delta 10.0 \
+  --max_gripper_delta 15.0 \
+  --num_inference_steps 20 \
+  --action_output_mode unnormalize \
+  --home
 ```
 
 Use `--home` only when you want the script to move to the hard-coded home pose
