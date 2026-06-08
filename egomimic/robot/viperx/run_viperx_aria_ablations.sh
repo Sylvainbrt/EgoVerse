@@ -174,7 +174,7 @@ fi
 if in_range 2; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
-    "robot_plus_local_aria_plus_egoverse_cached_500${RUN_SUFFIX}" \
+    "rob_aria_egov_cached_500${RUN_SUFFIX}" \
     1 \
     data=cotrain_viperx_aria_scale \
     model="${SCALE_MODEL}" \
@@ -187,7 +187,7 @@ fi
 if in_range 3; then
   mapfile -t SCALE_OVERRIDES < <(scale_resolver_overrides)
   run_training \
-    "robot_plus_local_aria_plus_egoverse_cached_2000${RUN_SUFFIX}" \
+    "rob_aria_egov_cached_2000${RUN_SUFFIX}" \
     1 \
     data=cotrain_viperx_aria_scale \
     model="${SCALE_MODEL}" \
